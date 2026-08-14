@@ -16,7 +16,7 @@ return new class extends Migration
 
     $table->foreignUuid('merchant_id')
         ->constrained('merchants')
-        ->cascadeOnDelete();
+        ->restrictOnDelete();
 
     $table->unsignedBigInteger('amount');
 
