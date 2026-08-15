@@ -18,7 +18,10 @@ class MerchantFactory extends Factory
     public function definition(): array
     {
         return [
-            //
+            
+            'name' => $this->faker->company(),
+            'email' => $this->faker->unique()->safeEmail(),
+            'status' => $this->faker->randomElement(['active', 'inactive','suspended']),
         ];
     }
 }

@@ -15,7 +15,7 @@ class Merchant extends Model
 
     public $guarded = [];
 
-    public function paymentIntent(): HasMany
+    public function paymentIntents(): HasMany
     {
         return $this->hasMany(PaymentIntent::class, 'merchant_id', 'id');
     }
