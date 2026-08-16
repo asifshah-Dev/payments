@@ -7,7 +7,8 @@ use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Concerns\HasUuids;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
-
+use Illuminate\Database\Eloquent\Relations\HasMany;
+use app\Models\PaymentAttempt;
 class PaymentIntent extends Model
 {
         use HasFactory;
@@ -27,4 +28,12 @@ class PaymentIntent extends Model
     {
         return $this->belongsTo(Merchant::class, 'merchant_id', 'id');
     }
+    public function paymentAttempts(): HasMany
+{
+    return $this->hasMany(
+        PaymentAttempt::class,
+        'payment_intent_id',
+        'id'
+    );
+}
 }
