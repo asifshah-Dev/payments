@@ -30,11 +30,17 @@ class PaymentCaptureService
                 throw new Exception("Invalid payment attempt status [{$lockedAttempt->status}] for capture.");
             }
 
-            $amount = $lockedAttempt->amount;
-            $currency = $lockedAttempt->currency;
+           $amount = $lockedAttempt->amount;
+$currency = $lockedAttempt->currency;
 
-            $fee = $this->calculatePlatformFee($amount);
-            $merchantAmount = $amount - $fee;
+if ($amount <= 0) {
+    throw new Exception(
+        "Cannot capture a payment attempt with invalid amount [{$amount}]."
+    );
+}
+
+$fee = $this->calculatePlatformFee($amount);
+$merchantAmount = $amount - $fee;
 
             // 3. Resolve accounts
             $clearingAccountId = $this->getGatewayClearingAccountId($lockedAttempt->processor, $currency);
