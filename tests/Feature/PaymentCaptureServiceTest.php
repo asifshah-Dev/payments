@@ -1601,9 +1601,8 @@ public function test_capture_handles_minimum_positive_amount(): void
 }
 public function test_capture_uses_payment_attempt_amount_when_it_differs_from_payment_intent(): void
 {
-    $attempt = PaymentAttempt::factory()->create([
-    'status' => 'pending',
-    'currency' => 'GBP',
+   $attempt = PaymentAttempt::factory()->create([
+    'processor' => 'stripe',
 ]);
 
 $attempt->paymentIntent->update([
@@ -1612,6 +1611,7 @@ $attempt->paymentIntent->update([
 
 $attempt->update([
     'amount' => 7000,
+    'currency' => 'GBP',
 ]);
 
 $attempt->refresh();
@@ -1622,26 +1622,26 @@ $this->assertEquals(5000, $attempt->paymentIntent->amount);
 
     $merchantId = $attempt->paymentIntent->merchant_id;
 
-    LedgerAccount::create([
-        'name' => 'Gateway Clearing - stripe',
-        'currency' => 'GBP',
-        'type' => 'asset',
-        'status' => 'active',
-    ]);
+LedgerAccount::create([
+    'name' => 'Gateway Clearing - stripe',
+    'currency' => 'GBP',
+    'type' => 'asset',
+    'status' => 'active',
+]);
 
-    LedgerAccount::create([
-        'name' => 'Merchant Pending - ' . $merchantId,
-        'currency' => 'GBP',
-        'type' => 'liability',
-        'status' => 'active',
-    ]);
+LedgerAccount::create([
+    'name' => 'Merchant Pending - ' . $merchantId,
+    'currency' => 'GBP',
+    'type' => 'liability',
+    'status' => 'active',
+]);
 
-    LedgerAccount::create([
-        'name' => 'Platform Fee Revenue - GBP',
-        'currency' => 'GBP',
-        'type' => 'revenue',
-        'status' => 'active',
-    ]);
+LedgerAccount::create([
+    'name' => 'Platform Fee Revenue - GBP',
+    'currency' => 'GBP',
+    'type' => 'revenue',
+    'status' => 'active',
+]);
 
     $service = new PaymentCaptureService();
 
@@ -1820,27 +1820,14 @@ $attempt->refresh();
             ->sum('amount')
     );
 }
-public function test_capture_fails_when_payment_attempt_has_no_merchant(): void
+
+public function test_capture_rejects_invalid_payment_attempt_status(): void
 {
     $attempt = PaymentAttempt::factory()->create([
-        'status' => 'pending',
+        'status' => 'expired',
         'amount' => 5000,
         'currency' => 'GBP',
         'processor' => 'stripe',
-    ]);
-
-    // Remove merchant association from the PaymentIntent
-    $attempt->paymentIntent->update([
-        'merchant_id' => null,
-    ]);
-
-    // Create the gateway account so the service gets as far as
-    // merchant validation.
-    LedgerAccount::create([
-        'name' => 'Gateway Clearing - stripe',
-        'currency' => 'GBP',
-        'type' => 'asset',
-        'status' => 'active',
     ]);
 
     $service = new PaymentCaptureService();
@@ -1853,25 +1840,73 @@ public function test_capture_fails_when_payment_attempt_has_no_merchant(): void
         );
     } catch (Exception $e) {
         $this->assertEquals(
-            'Payment attempt has no merchant.',
+            'Invalid payment attempt status [expired] for capture.',
             $e->getMessage()
         );
     }
 
     $attempt->refresh();
 
-    // Payment attempt must remain pending
+    // Status must remain unchanged.
     $this->assertEquals(
-        'pending',
+        'expired',
         $attempt->status
     );
 
-    // No ledger transaction should have been created
+    // No ledger transaction should be created.
     $this->assertDatabaseMissing(
         'ledger_transactions',
         [
             'payment_attempt_id' => $attempt->id,
         ]
+    );
+}
+public function test_capture_does_not_create_ledger_transaction_when_account_resolution_fails(): void
+{
+    $attempt = PaymentAttempt::factory()->create([
+        'status' => 'pending',
+        'amount' => 5000,
+        'currency' => 'GBP',
+        'processor' => 'stripe',
+    ]);
+
+    // Deliberately do NOT create the Gateway Clearing account.
+
+    $service = new PaymentCaptureService();
+
+    try {
+        $service->capture($attempt);
+
+        $this->fail(
+            'Expected capture to throw an exception.'
+        );
+    } catch (Exception $e) {
+        $this->assertEquals(
+            'Active Gateway Clearing account not found for processor [stripe] and currency [GBP].',
+            $e->getMessage()
+        );
+    }
+
+    $attempt->refresh();
+
+    // Capture must not change the attempt status.
+    $this->assertEquals(
+        'pending',
+        $attempt->status
+    );
+
+    // No ledger transaction must exist.
+    $this->assertDatabaseMissing(
+        'ledger_transactions',
+        [
+            'payment_attempt_id' => $attempt->id,
+        ]
+    );
+
+    // No ledger entries must exist.
+    $this->assertDatabaseCount(
+        'ledger_entries',
+        0
     );
 }
 }

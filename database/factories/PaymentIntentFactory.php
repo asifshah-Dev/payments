@@ -16,21 +16,15 @@ class PaymentIntentFactory extends Factory
      * @return array<string, mixed>
      */
     public function definition(): array
-    {
-        return [
-            
-            'merchant_id' => \App\Models\Merchant::factory(),
-            'amount' => $this->faker->numberBetween(100, 10000),
-            'currency' => $this->faker->randomElement([
-    'USD',
-    'EUR',
-    'GBP',
-    'PKR',
-]),
-            'description' => $this->faker->sentence(),
-            'status' => $this->faker->randomElement(['pending', 'processing', 'succeeded', 'failed', 'cancelled']),
-            'idempotency_key' => $this->faker->uuid(),
-            'request_hash' => $this->faker->sha256(),
-        ];
-    }
+{
+    return [
+        'merchant_id' => \App\Models\Merchant::factory(),
+        'amount' => 1000,
+        'currency' => 'GBP',
+        'description' => 'Test payment',
+        'status' => 'pending',
+        'idempotency_key' => $this->faker->uuid(),
+        'request_hash' => $this->faker->sha256(),
+    ];
+}
 }
