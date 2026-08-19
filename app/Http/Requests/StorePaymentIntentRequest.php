@@ -19,11 +19,12 @@ class StorePaymentIntentRequest extends FormRequest
     }
 
     public function rules(): array
-{
-    return [
-        'amount' => ['required', 'integer', 'min:1'],
-        'currency' => ['required', 'string', 'size:3'],
-        'description' => ['nullable', 'string'],
-    ];
-}
+    {
+        return [
+            'amount' => ['required', 'integer', 'min:1'],
+            'currency' => ['required', 'string', 'size:3'],
+            'description' => ['nullable', 'string'],
+            'idempotency_key' => ['required', 'string', 'max:255'],
+        ];
+    }
 }

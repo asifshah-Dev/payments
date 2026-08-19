@@ -6,43 +6,41 @@ use Illuminate\Support\Facades\Schema;
 
 return new class extends Migration
 {
-    /**
-     * Run the migrations.
-     */
     public function up(): void
     {
         Schema::create('ledger_transactions', function (Blueprint $table) {
-    $table->uuid('id')->primary();
+            $table->uuid('id')->primary();
 
-    $table->string('type', 50);
-    
-    $table->uuid('payment_attempt_id')->nullable();
+            $table->string('type', 50);
 
-    $table->string('reference_type', 100)->nullable();
-    $table->uuid('reference_id')->nullable();
+            $table->unsignedBigInteger('amount');
+            $table->char('currency', 3);
+            $table->string('direction', 10);
 
-    $table->text('description')->nullable();
+            $table->uuid('payment_attempt_id')->nullable();
 
-    $table->timestamp('posted_at');
+            $table->string('reference_type', 100)->nullable();
+            $table->uuid('reference_id')->nullable();
 
-    $table->timestamps();
+            $table->text('description')->nullable();
 
-    $table->foreign('payment_attempt_id')
-          ->references('id')
-          ->on('payment_attempts')
-          ->restrictOnDelete();
+            $table->timestamp('posted_at');
 
-    $table->index(['reference_type', 'reference_id']);
-    $table->index('payment_attempt_id');
-    $table->index('type');
-});
+            $table->timestamps();
+
+            $table->foreign('payment_attempt_id')
+                ->references('id')
+                ->on('payment_attempts')
+                ->restrictOnDelete();
+
+            $table->index(['reference_type', 'reference_id']);
+            $table->index('payment_attempt_id');
+            $table->index('type');
+        });
     }
 
-    /**
-     * Reverse the migrations.
-     */
     public function down(): void
     {
-        Schema::dropIfExists('ledger_transaction');
+        Schema::dropIfExists('ledger_transactions');
     }
 };

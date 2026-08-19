@@ -38,6 +38,6 @@ return new class extends Migration
      */
     public function down(): void
     {
-        Schema::dropIfExists('incoming_webhook_log');
+        Schema::dropIfExists('incoming_webhook_logs');
     }
 };

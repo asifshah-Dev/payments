@@ -20,13 +20,17 @@ class PaymentAttempt extends Model
 
     protected $fillable = [
     'payment_intent_id',
-    'processor', // <--- Ensure this is here
+    'processor',
     'status',
     'amount',
     'currency',
     'processor_reference_id',
     'failure_code',
     'failure_message',
+];
+
+protected $casts = [
+    'amount' => 'integer',
 ];
 
     public function paymentIntent(): BelongsTo
