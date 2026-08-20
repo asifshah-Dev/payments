@@ -34,6 +34,7 @@ class LedgerAccount extends Model
 
         $allowedStatuses = [
             'active',
+            'inactive',
             'frozen',
             'closed',
         ];

@@ -18,10 +18,29 @@ class MerchantFactory extends Factory
     public function definition(): array
     {
         return [
-            
             'name' => $this->faker->company(),
             'email' => $this->faker->unique()->safeEmail(),
-            'status' => $this->faker->randomElement(['active', 'inactive','suspended']),
+            'status' => 'active',
         ];
+    }
+
+    /**
+     * Indicate that the merchant is inactive.
+     */
+    public function inactive(): static
+    {
+        return $this->state(fn (array $attributes) => [
+            'status' => 'inactive',
+        ]);
+    }
+
+    /**
+     * Indicate that the merchant is suspended.
+     */
+    public function suspended(): static
+    {
+        return $this->state(fn (array $attributes) => [
+            'status' => 'suspended',
+        ]);
     }
 }

@@ -345,7 +345,7 @@ test('rejects payment intent creation for an inactive merchant', function () {
 
     expect(fn () =>
         app(PaymentIntentService::class)->create(
-            merchant: $merchant,
+            merchantId: $merchant->id,
             amount: 5000,
             currency: 'USD',
             description: 'Test payment',
