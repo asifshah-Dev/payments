@@ -22,6 +22,10 @@ class PaymentIntentService
             'Payment amount must be greater than zero.'
         );
     }
+    // Inside your PaymentIntentService (or create method)
+if ($merchant->status !== 'active') {
+    throw new RuntimeException('Merchant is inactive.');
+}
 
     $currency = strtoupper($currency);
 

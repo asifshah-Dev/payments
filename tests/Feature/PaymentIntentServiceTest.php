@@ -4,6 +4,7 @@ use App\Models\Merchant;
 use App\Models\PaymentIntent;
 use App\Services\PaymentIntentService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Str;
 
 uses(RefreshDatabase::class);
 
@@ -333,4 +334,24 @@ test('treats currency case differences as the same request', function () {
 
     expect($second->id)->toBe($first->id);
     expect(PaymentIntent::count())->toBe(1);
+});
+test('rejects payment intent creation for an inactive merchant', function () {
+    $merchant = Merchant::create([
+        'name' => 'Inactive Merchant',
+        'email' => Str::uuid() . '@example.com',
+        'status' => 'inactive',
+        'api_key_hash' => hash('sha256', Str::random(40)),
+    ]);
+
+    expect(fn () =>
+        app(PaymentIntentService::class)->create(
+            merchant: $merchant,
+            amount: 5000,
+            currency: 'USD',
+            description: 'Test payment',
+            idempotencyKey: Str::uuid()->toString(),
+        )
+    )->toThrow(RuntimeException::class);
+
+    expect(PaymentIntent::count())->toBe(0);
 });

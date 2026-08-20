@@ -14,6 +14,10 @@ return new class extends Migration
        Schema::create('ledger_accounts', function (Blueprint $table) {
     $table->uuid('id')->primary();
 
+    $table->uuid('merchant_id')->nullable();
+
+
+
     $table->string('name', 150);
 
     $table->string('type', 30);
@@ -27,6 +31,11 @@ return new class extends Migration
     $table->timestamps();
 
     $table->index(['type', 'status']);
+    $table->unique(['merchant_id', 'name', 'type', 'currency'], 'merchant_account_unique');
+    $table->foreign('merchant_id')
+                ->references('id')
+                ->on('merchants')
+                ->cascadeOnRestrict();
 });
     }
 
@@ -35,6 +44,6 @@ return new class extends Migration
      */
     public function down(): void
     {
-        Schema::dropIfExists('ledger_account');
+        Schema::dropIfExists('ledger_accounts');
     }
 };

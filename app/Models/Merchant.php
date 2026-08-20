@@ -19,4 +19,8 @@ class Merchant extends Model
     {
         return $this->hasMany(PaymentIntent::class, 'merchant_id', 'id');
     }
+    public function ledgerAccounts(): HasMany
+    {
+        return $this->hasMany(LedgerAccount::class, 'merchant_id', 'id');
+    }
 }
