@@ -7,8 +7,6 @@ use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
-use App\Models\LedgerTransaction;
-use App\Models\PaymentIntent;
 
 class PaymentAttempt extends Model
 {
@@ -19,19 +17,19 @@ class PaymentAttempt extends Model
     protected $keyType = 'string';
 
     protected $fillable = [
-    'payment_intent_id',
-    'processor',
-    'status',
-    'amount',
-    'currency',
-    'processor_reference_id',
-    'failure_code',
-    'failure_message',
-];
+        'payment_intent_id',
+        'processor',
+        'status',
+        'amount',
+        'currency',
+        'processor_reference_id',
+        'failure_code',
+        'failure_message',
+    ];
 
-protected $casts = [
-    'amount' => 'integer',
-];
+    protected $casts = [
+        'amount' => 'integer',
+    ];
 
     public function paymentIntent(): BelongsTo
     {

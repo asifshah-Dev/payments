@@ -6,11 +6,17 @@ use App\Models\PaymentAttempt;
 use App\Models\PaymentIntent;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Str;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
 
 uses(RefreshDatabase::class);
 
 function createLedgerPaymentAttempt(): PaymentAttempt
 {
+    dump(
+    DB::connection()->getDatabaseName(),
+    Schema::getColumnListing('ledger_transactions')
+);
     $merchant = Merchant::create([
         'name' => 'Ledger Test Merchant',
         'email' => Str::uuid() . '@example.com',

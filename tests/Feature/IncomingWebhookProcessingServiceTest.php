@@ -6,6 +6,7 @@ use App\Models\PaymentIntent;
 use App\Services\IncomingWebhookProcessingService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Str;
+use App\Models\LedgerAccount;
 use InvalidArgumentException;
 use RuntimeException;
 
@@ -38,8 +39,26 @@ function createProcessingPaymentAttempt(): PaymentAttempt
         'currency' => $paymentIntent->currency,
     ]);
 }
+function createWebhookLedgerAccounts(): void
+{
+    LedgerAccount::create([
+        'name' => 'Stripe Clearing',
+        'type' => 'asset',
+        'currency' => 'USD',
+        'status' => 'active',
+    ]);
+
+    LedgerAccount::create([
+        'name' => 'Merchant Payable',
+        'type' => 'liability',
+        'currency' => 'USD',
+        'status' => 'active',
+    ]);
+}
 test('processes a payment processing webhook', function () {
     $attempt = createProcessingPaymentAttempt();
+
+    createWebhookLedgerAccounts();
 
     $webhook = IncomingWebhookLog::create([
         'processor' => 'stripe',
@@ -64,7 +83,7 @@ test('processes a payment processing webhook', function () {
 });
 test('processes a payment succeeded webhook', function () {
     $attempt = createProcessingPaymentAttempt();
-
+    createWebhookLedgerAccounts();
     $attempt->update([
         'status' => 'processing',
     ]);
@@ -93,7 +112,7 @@ test('processes a payment succeeded webhook', function () {
 });
 test('processes a payment failed webhook', function () {
     $attempt = createProcessingPaymentAttempt();
-
+    createWebhookLedgerAccounts();
     $attempt->update([
         'status' => 'processing',
     ]);
@@ -122,7 +141,7 @@ test('processes a payment failed webhook', function () {
 });
 test('does not process an already processed webhook again', function () {
     $attempt = createProcessingPaymentAttempt();
-
+    createWebhookLedgerAccounts();
     $attempt->update([
         'status' => 'processing',
     ]);
@@ -241,7 +260,7 @@ test('does not change payment attempt when webhook causes invalid transition', f
 });
 test('retries a failed webhook', function () {
     $attempt = createProcessingPaymentAttempt();
-
+    createWebhookLedgerAccounts();
     $attempt->update([
         'status' => 'processing',
     ]);
@@ -271,7 +290,7 @@ test('retries a failed webhook', function () {
 });
 test('rejects webhook after maximum processing attempts', function () {
     $attempt = createProcessingPaymentAttempt();
-
+    createWebhookLedgerAccounts();
     $webhook = IncomingWebhookLog::create([
         'processor' => 'stripe',
         'processor_event_id' => 'evt_max_' . Str::uuid(),
@@ -293,7 +312,7 @@ test('rejects webhook after maximum processing attempts', function () {
 });
 test('rejects a webhook that is currently locked', function () {
     $attempt = createProcessingPaymentAttempt();
-
+    createWebhookLedgerAccounts();
     $webhook = IncomingWebhookLog::create([
         'processor' => 'stripe',
         'processor_event_id' => 'evt_locked_' . Str::uuid(),
@@ -318,7 +337,7 @@ test('rejects a webhook that is currently locked', function () {
 test('reclaims an expired webhook lock', function () {
     $attempt = createProcessingPaymentAttempt();
   //  $attempt = createProcessingPaymentAttempt();
-
+    createWebhookLedgerAccounts();
     $attempt->update([
         'status' => 'processing',
     ]);

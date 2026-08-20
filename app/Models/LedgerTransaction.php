@@ -6,6 +6,7 @@ use Illuminate\Database\Eloquent\Concerns\HasUuids;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 
 class LedgerTransaction extends Model
 {
@@ -16,18 +17,19 @@ class LedgerTransaction extends Model
     protected $keyType = 'string';
 
     protected $fillable = [
+        'payment_attempt_id',
         'type',
         'amount',
         'currency',
         'direction',
-        'payment_attempt_id',
         'reference_type',
         'reference_id',
-        'description',
         'posted_at',
+        'description',
     ];
 
     protected $casts = [
+        'amount' => 'integer',
         'posted_at' => 'datetime',
     ];
 
@@ -36,6 +38,15 @@ class LedgerTransaction extends Model
         return $this->belongsTo(
             PaymentAttempt::class,
             'payment_attempt_id',
+            'id'
+        );
+    }
+
+    public function entries(): HasMany
+    {
+        return $this->hasMany(
+            LedgerEntry::class,
+            'ledger_transaction_id',
             'id'
         );
     }

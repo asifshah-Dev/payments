@@ -24,16 +24,4 @@ class PaymentAttemptFactory extends Factory
             'failure_message' => null,
         ];
     }
-
-    public function configure(): static
-    {
-        return $this->afterCreating(function (PaymentAttempt $attempt) {
-            if ($attempt->paymentIntent) {
-                $attempt->update([
-                    'amount' => $attempt->paymentIntent->amount,
-                    'currency' => $attempt->paymentIntent->currency,
-                ]);
-            }
-        });
-    }
 }

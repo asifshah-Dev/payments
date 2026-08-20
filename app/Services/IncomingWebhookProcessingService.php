@@ -116,6 +116,13 @@ class IncomingWebhookProcessingService
             attempt: $attempt,
             toStatus: $status,
         );
+        if ($status === 'succeeded') {
+    app(PaymentSettlementService::class)->settle(
+        paymentAttempt: $attempt->fresh(),
+    );
+}
+
+        
 
         $webhook->update([
             'status' => 'processed',
