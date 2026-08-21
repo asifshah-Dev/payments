@@ -33,6 +33,25 @@ class LedgerTransaction extends Model
         'posted_at' => 'datetime',
     ];
 
+   protected static function booted()
+{
+    static::updating(function ($transaction) {
+        if ($transaction->getOriginal('posted_at') !== null) {
+            throw new \InvalidArgumentException(
+                "A posted ledger transaction cannot be modified."
+            );
+        }
+    });
+
+    static::deleting(function ($transaction) {
+        if ($transaction->posted_at !== null) {
+            throw new \InvalidArgumentException(
+                "A posted ledger transaction cannot be deleted."
+            );
+        }
+    });
+}
+
     public function paymentAttempt(): BelongsTo
     {
         return $this->belongsTo(

@@ -21,7 +21,7 @@ class LedgerAccountFactory extends Factory
             'name' => $this->faker->word(),
             'type' => $this->faker->randomElement(['asset', 'liability', 'equity', 'revenue', 'expense']),
             'currency' => $this->faker->currencyCode(),
-            'status' => $this->faker->randomElement(['active', 'inactive']),
+            'status' => 'active',
         ];
     }
 }

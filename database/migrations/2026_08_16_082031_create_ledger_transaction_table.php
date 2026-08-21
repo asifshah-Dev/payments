@@ -24,7 +24,7 @@ return new class extends Migration
 
             $table->text('description')->nullable();
 
-            $table->timestamp('posted_at');
+            $table->timestamp('posted_at')->nullable();
 
             $table->timestamps();
 
@@ -36,6 +36,7 @@ return new class extends Migration
             $table->index(['reference_type', 'reference_id']);
             $table->index('payment_attempt_id');
             $table->index('type');
+            $table->index('posted_at');
         });
     }
 

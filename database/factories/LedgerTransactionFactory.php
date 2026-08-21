@@ -18,8 +18,7 @@ class LedgerTransactionFactory extends Factory
     public function definition(): array
     {
         return [
-            'type' => $this->faker->randomElement(['debit', 'credit']),
-            'payment_attempt_id' => null,
+'type' => 'payment', // Use a valid transaction type here            'payment_attempt_id' => null,
             'reference_type' => null,
             'reference_id' => null,
             'description' => $this->faker->sentence(),

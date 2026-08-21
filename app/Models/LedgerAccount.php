@@ -91,6 +91,7 @@ class LedgerAccount extends Model
             }
         });
     }
+    
     public function entries(): HasMany
     {
         return $this->hasMany(LedgerEntry::class);
@@ -99,4 +100,21 @@ class LedgerAccount extends Model
     {
         return $this->belongsTo(Merchant::class);
     }
+
+    public function balance(): int
+{
+    $debits = (int) $this->entries()
+        ->where('currency', $this->currency)
+        ->where('type', 'debit')
+        ->sum('amount');
+
+    $credits = (int) $this->entries()
+        ->where('currency', $this->currency)
+        ->where('type', 'credit')
+        ->sum('amount');
+
+    return in_array($this->type, ['asset', 'expense'], true)
+        ? $debits - $credits
+        : $credits - $debits;
+}
 }

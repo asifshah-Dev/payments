@@ -13,10 +13,7 @@ uses(RefreshDatabase::class);
 
 function createLedgerPaymentAttempt(): PaymentAttempt
 {
-    dump(
-    DB::connection()->getDatabaseName(),
-    Schema::getColumnListing('ledger_transactions')
-);
+   
     $merchant = Merchant::create([
         'name' => 'Ledger Test Merchant',
         'email' => Str::uuid() . '@example.com',
