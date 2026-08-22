@@ -23,89 +23,120 @@ class LedgerEntry extends Model
         'currency',
     ];
 
- protected static function booted()
-{
-    static::creating(function ($ledgerEntry) {
-        $allowedTypes = ['debit', 'credit'];
+    protected static function booted()
+    {
+        static::creating(function ($ledgerEntry) {
+            // 1. Verify parent transaction is not posted (entries cannot be added to a posted transaction)
+            $transaction = $ledgerEntry->ledgerTransaction ?? \App\Models\LedgerTransaction::find($ledgerEntry->ledger_transaction_id);
 
-        if (!in_array($ledgerEntry->type, $allowedTypes)) {
-            throw new \InvalidArgumentException(
-                "Invalid ledger entry type: {$ledgerEntry->type}"
-            );
-        }
+            if ($transaction && $transaction->posted_at !== null) {
+                throw new \InvalidArgumentException(
+                    "Cannot add entries to a posted transaction."
+                );
+            }
 
-        $transaction = $ledgerEntry->ledgerTransaction ?? \App\Models\LedgerTransaction::find($ledgerEntry->ledger_transaction_id);
+            // Normalize currency to uppercase first
+            if ($ledgerEntry->currency) {
+                $ledgerEntry->currency = strtoupper($ledgerEntry->currency);
+            }
 
-        if ($transaction && $ledgerEntry->currency !== $transaction->currency) {
-            throw new \InvalidArgumentException(
-                "Ledger entry currency must match transaction currency."
-            );
-        }
+            // Enforce entry amount invariant
+            if ($ledgerEntry->amount <= 0) {
+                throw new \InvalidArgumentException(
+                    "Ledger entry amount must be greater than zero."
+                );
+            }
 
-        $account = $ledgerEntry->ledgerAccount ?? \App\Models\LedgerAccount::find($ledgerEntry->ledger_account_id);
+            $allowedTypes = ['debit', 'credit'];
 
-        if ($account && $ledgerEntry->currency !== $account->currency) {
-            throw new \InvalidArgumentException(
-                "Ledger entry currency must match ledger account currency."
-            );
-        }
+            if (!in_array($ledgerEntry->type, $allowedTypes)) {
+                throw new \InvalidArgumentException(
+                    "Invalid ledger entry type: {$ledgerEntry->type}"
+                );
+            }
 
-        if ($account && $account->status !== 'active') {
-            throw new \InvalidArgumentException(
-                "Cannot create entry on a {$account->status} ledger account."
-            );
-        }
-    });
+            if ($transaction && $ledgerEntry->currency !== $transaction->currency) {
+                throw new \InvalidArgumentException(
+                    "Ledger entry currency must match transaction currency."
+                );
+            }
 
-    static::updating(function ($ledgerEntry) {
-        // 1. Verify parent transaction is not posted (posted entries cannot be modified)
-        $transaction = $ledgerEntry->ledgerTransaction ?? \App\Models\LedgerTransaction::find($ledgerEntry->ledger_transaction_id);
+            $account = $ledgerEntry->ledgerAccount ?? \App\Models\LedgerAccount::find($ledgerEntry->ledger_account_id);
 
-        if ($transaction && $transaction->posted_at !== null) {
-            throw new \InvalidArgumentException(
-                "A ledger entry belonging to a posted transaction cannot be modified."
-            );
-        }
+            if ($account && $ledgerEntry->currency !== $account->currency) {
+                throw new \InvalidArgumentException(
+                    "Ledger entry currency must match ledger account currency."
+                );
+            }
 
-        $allowedTypes = ['debit', 'credit'];
+            if ($account && $account->status !== 'active') {
+                throw new \InvalidArgumentException(
+                    "Cannot create entry on a {$account->status} ledger account."
+                );
+            }
+        });
 
-        if ($ledgerEntry->isDirty('type') && !in_array($ledgerEntry->type, $allowedTypes)) {
-            throw new \InvalidArgumentException(
-                "Invalid ledger entry type: {$ledgerEntry->type}"
-            );
-        }
+        static::updating(function ($ledgerEntry) {
+            // Normalize currency on update if changed
+            if ($ledgerEntry->isDirty('currency') && $ledgerEntry->currency) {
+                $ledgerEntry->currency = strtoupper($ledgerEntry->currency);
+            }
 
-        if (($ledgerEntry->isDirty('currency') || $ledgerEntry->isDirty('ledger_transaction_id')) && $transaction && $ledgerEntry->currency !== $transaction->currency) {
-            throw new \InvalidArgumentException(
-                "Ledger entry currency must match transaction currency."
-            );
-        }
+            // 1. Verify parent transaction is not posted (posted entries cannot be modified)
+            $transaction = $ledgerEntry->ledgerTransaction ?? \App\Models\LedgerTransaction::find($ledgerEntry->ledger_transaction_id);
 
-        $account = $ledgerEntry->ledgerAccount ?? \App\Models\LedgerAccount::find($ledgerEntry->ledger_account_id);
+            if ($transaction && $transaction->posted_at !== null) {
+                throw new \InvalidArgumentException(
+                    "A ledger entry belonging to a posted transaction cannot be modified."
+                );
+            }
 
-        if (($ledgerEntry->isDirty('currency') || $ledgerEntry->isDirty('ledger_account_id')) && $account && $ledgerEntry->currency !== $account->currency) {
-            throw new \InvalidArgumentException(
-                "Ledger entry currency must match ledger account currency."
-            );
-        }
+            // Enforce amount invariant on update if changed
+            if ($ledgerEntry->isDirty('amount') && $ledgerEntry->amount <= 0) {
+                throw new \InvalidArgumentException(
+                    "Ledger entry amount must be greater than zero."
+                );
+            }
 
-        if ($account && $account->status !== 'active') {
-            throw new \InvalidArgumentException(
-                "Cannot create entry on a {$account->status} ledger account."
-            );
-        }
-    });
+            $allowedTypes = ['debit', 'credit'];
 
-    static::deleting(function ($ledgerEntry) {
-    $transaction = $ledgerEntry->ledgerTransaction ?? \App\Models\LedgerTransaction::find($ledgerEntry->ledger_transaction_id);
+            if ($ledgerEntry->isDirty('type') && !in_array($ledgerEntry->type, $allowedTypes)) {
+                throw new \InvalidArgumentException(
+                    "Invalid ledger entry type: {$ledgerEntry->type}"
+                );
+            }
 
-    if ($transaction && $transaction->posted_at !== null) {
-        throw new \InvalidArgumentException(
-            "A ledger entry belonging to a posted transaction cannot be deleted."
-        );
+            if (($ledgerEntry->isDirty('currency') || $ledgerEntry->isDirty('ledger_transaction_id')) && $transaction && $ledgerEntry->currency !== $transaction->currency) {
+                throw new \InvalidArgumentException(
+                    "Ledger entry currency must match transaction currency."
+                );
+            }
+
+            $account = $ledgerEntry->ledgerAccount ?? \App\Models\LedgerAccount::find($ledgerEntry->ledger_account_id);
+
+            if (($ledgerEntry->isDirty('currency') || $ledgerEntry->isDirty('ledger_account_id')) && $account && $ledgerEntry->currency !== $account->currency) {
+                throw new \InvalidArgumentException(
+                    "Ledger entry currency must match ledger account currency."
+                );
+            }
+
+            if ($account && $account->status !== 'active') {
+                throw new \InvalidArgumentException(
+                    "Cannot create entry on a {$account->status} ledger account."
+                );
+            }
+        });
+
+        static::deleting(function ($ledgerEntry) {
+            $transaction = $ledgerEntry->ledgerTransaction ?? \App\Models\LedgerTransaction::find($ledgerEntry->ledger_transaction_id);
+
+            if ($transaction && $transaction->posted_at !== null) {
+                throw new \InvalidArgumentException(
+                    "A ledger entry belonging to a posted transaction cannot be deleted."
+                );
+            }
+        });
     }
-});
-}
 
     public function transaction(): BelongsTo
     {
