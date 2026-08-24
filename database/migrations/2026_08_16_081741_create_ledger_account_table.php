@@ -31,7 +31,7 @@ return new class extends Migration
     $table->timestamps();
 
     $table->index(['type', 'status']);
-    $table->unique(['merchant_id', 'name', 'type', 'currency'], 'merchant_account_unique');
+    $table->unique(['merchant_id',  'type', 'currency'], 'merchant_account_unique');
     $table->foreign('merchant_id')
                 ->references('id')
                 ->on('merchants')
