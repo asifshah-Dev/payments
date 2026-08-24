@@ -195,6 +195,15 @@ it('prevents posting the same payment twice with its fee', function () {
         'status' => 'active',
     ]);
 
+    // Add the missing platform fee revenue account here
+    LedgerAccount::create([
+        'name' => 'Platform Fee Revenue',
+        'type' => 'revenue',
+        'currency' => 'PKR',
+        'merchant_id' => null,
+        'status' => 'active',
+    ]);
+
     LedgerAccountMapping::create([
         'context' => 'successful_payment',
         'currency' => 'PKR',

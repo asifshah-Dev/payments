@@ -23,6 +23,7 @@ class PaymentAttempt extends Model
         'amount',
         'currency',
         'processor_reference_id',
+        'fee_amount',
         'failure_code',
         'failure_message',
     ];

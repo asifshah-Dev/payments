@@ -17,10 +17,23 @@ class LedgerPostingService
     /**
      * Automatically resolve context mapping and post from a payment attempt.
      */
+   /**
+     * Automatically resolve context mapping and post from a payment attempt.
+     */
     public function postFromPaymentAttempt(PaymentAttempt $paymentAttempt): LedgerTransaction
     {
         if ($paymentAttempt->status !== 'succeeded') {
             throw new RuntimeException('Cannot post ledger transaction for a non-successful payment attempt.');
+        }
+
+        $feeAmount = $paymentAttempt->fee_amount ?? 0;
+
+        if ($feeAmount < 0) {
+            throw new InvalidArgumentException('Fee amount cannot be negative.');
+        }
+
+        if ($feeAmount > $paymentAttempt->amount) {
+            throw new InvalidArgumentException('Fee amount cannot exceed the payment amount.');
         }
 
         // Automatically resolve matching accounts for this payment context
@@ -38,25 +51,46 @@ class LedgerPostingService
             throw new RuntimeException('No account mapping found for this payment context.');
         }
 
+        $entries = [
+            [
+                'ledger_account_id' => $cashAccount->id,
+                'type' => 'debit',
+                'amount' => $paymentAttempt->amount,
+                'currency' => $paymentAttempt->currency,
+            ],
+            [
+                'ledger_account_id' => $merchantAccount->id,
+                'type' => 'credit',
+                'amount' => $paymentAttempt->amount - $feeAmount,
+                'currency' => $paymentAttempt->currency,
+            ],
+        ];
+
+        // If a fee is present, add the platform fee revenue credit entry
+        if ($feeAmount > 0) {
+            $feeAccount = LedgerAccount::where('type', 'revenue')
+                ->where('currency', $paymentAttempt->currency)
+                ->whereNull('merchant_id')
+                ->first();
+
+            if (!$feeAccount) {
+                throw new RuntimeException('Platform fee revenue account could not be found.');
+            }
+
+            $entries[] = [
+                'ledger_account_id' => $feeAccount->id,
+                'type' => 'credit',
+                'amount' => $feeAmount,
+                'currency' => $paymentAttempt->currency,
+            ];
+        }
+
         return $this->post(
             type: 'payment_capture',
             amount: $paymentAttempt->amount,
             currency: $paymentAttempt->currency,
             direction: 'credit',
-            entries: [
-                [
-                    'ledger_account_id' => $cashAccount->id,
-                    'type' => 'debit',
-                    'amount' => $paymentAttempt->amount,
-                    'currency' => $paymentAttempt->currency,
-                ],
-                [
-                    'ledger_account_id' => $merchantAccount->id,
-                    'type' => 'credit',
-                    'amount' => $paymentAttempt->amount,
-                    'currency' => $paymentAttempt->currency,
-                ],
-            ],
+            entries: $entries,
             paymentAttemptId: $paymentAttempt->id,
             description: 'Automatic payment capture for attempt ' . $paymentAttempt->id
         );
