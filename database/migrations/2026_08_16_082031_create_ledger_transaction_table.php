@@ -37,6 +37,7 @@ return new class extends Migration
             $table->index('payment_attempt_id');
             $table->index('type');
             $table->index('posted_at');
+            $table->unique(['payment_attempt_id', 'type']);
         });
     }
 

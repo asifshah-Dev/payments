@@ -97,18 +97,123 @@ class LedgerPostingService
     }
 
     /**
+     * Post a refund transaction for a given payment attempt, ensuring cumulative refunds do not exceed the payment amount.
+     */
+    public function postRefundFromPaymentAttempt(PaymentAttempt $paymentAttempt, int $refundAmount): LedgerTransaction
+    {
+        if ($refundAmount <= 0) {
+            throw new InvalidArgumentException('Refund amount must be greater than zero.');
+        }
+
+        // Calculate total already refunded for this payment attempt
+        $alreadyRefunded = LedgerTransaction::where('payment_attempt_id', $paymentAttempt->id)
+            ->where('type', 'payment_refund')
+            ->sum('amount');
+
+        $remainingRefundable = $paymentAttempt->amount - $alreadyRefunded;
+
+        if ($refundAmount > $remainingRefundable) {
+            throw new InvalidArgumentException('Refund amount exceeds the remaining refundable balance of ' . $remainingRefundable);
+        }
+
+        $feeAmount = $paymentAttempt->fee_amount ?? 0;
+        
+        // Calculate pro-rata fee reversal based on the original payment amount ratio
+        $feeRefundAmount = 0;
+        if ($feeAmount > 0 && $paymentAttempt->amount > 0) {
+            // If this refund exhausts the exact remaining balance, sweep any remaining fee dust to prevent rounding discrepancies
+            if ($refundAmount === $remainingRefundable) {
+                $alreadyRefundedFee = LedgerTransaction::where('payment_attempt_id', $paymentAttempt->id)
+                    ->where('type', 'payment_refund')
+                    ->with('entries')
+                    ->get()
+                    ->flatMap->entries
+                    ->where('ledger_account_id', LedgerAccount::where('type', 'revenue')->whereNull('merchant_id')->first()?->id)
+                    ->where('type', 'debit')
+                    ->sum('amount');
+
+                $feeRefundAmount = $feeAmount - $alreadyRefundedFee;
+            } else {
+                $feeRefundAmount = (int) round(($refundAmount / $paymentAttempt->amount) * $feeAmount);
+            }
+        }
+
+        $netRefundAmount = $refundAmount - $feeRefundAmount;
+
+        // Resolve Accounts
+        $cashAccount = LedgerAccount::where('type', 'asset')
+            ->where('currency', $paymentAttempt->currency)
+            ->whereNull('merchant_id')
+            ->first();
+
+        $merchantAccount = LedgerAccount::where('type', 'liability')
+            ->where('currency', $paymentAttempt->currency)
+            ->when(isset($paymentAttempt->merchant_id), fn($q) => $q->where('merchant_id', $paymentAttempt->merchant_id))
+            ->first();
+
+        if (!$cashAccount || !$merchantAccount) {
+            throw new RuntimeException('No account mapping found for this refund context.');
+        }
+
+        $entries = [
+            [
+                'ledger_account_id' => $merchantAccount->id,
+                'type' => 'debit',
+                'amount' => $netRefundAmount,
+                'currency' => $paymentAttempt->currency,
+            ],
+            [
+                'ledger_account_id' => $cashAccount->id,
+                'type' => 'credit',
+                'amount' => $refundAmount,
+                'currency' => $paymentAttempt->currency,
+            ],
+        ];
+
+        if ($feeRefundAmount > 0) {
+            $feeAccount = LedgerAccount::where('type', 'revenue')
+                ->where('currency', $paymentAttempt->currency)
+                ->whereNull('merchant_id')
+                ->first();
+
+            if (!$feeAccount) {
+                throw new RuntimeException('Platform fee revenue account could not be found.');
+            }
+
+            $entries[] = [
+                'ledger_account_id' => $feeAccount->id,
+                'type' => 'debit',
+                'amount' => $feeRefundAmount,
+                'currency' => $paymentAttempt->currency,
+            ];
+        }
+
+        return $this->post(
+            type: 'payment_refund',
+            amount: $refundAmount,
+            currency: $paymentAttempt->currency,
+            direction: 'debit',
+            entries: $entries,
+            paymentAttemptId: $paymentAttempt->id,
+            description: 'Refund for payment attempt ' . $paymentAttempt->id
+        );
+    }
+
+    /**
      * Automatically resolve context mapping and post from a payout.
      */
-    public function postFromPayout(Payout $payout): LedgerTransaction
-    {
+  public function postFromPayout(Payout $payout): LedgerTransaction
+{
+    return DB::transaction(function () use ($payout) {
         if ($payout->status !== 'completed') {
             throw new RuntimeException('Cannot post ledger transaction for a non-completed payout.');
         }
 
-        // Automatically resolve matching accounts for this payout context
+        // Lock the merchant liability account row for update to prevent race conditions
         $merchantAccount = LedgerAccount::where('type', 'liability')
             ->where('currency', $payout->currency)
             ->where('merchant_id', $payout->merchant_id)
+            ->lockForUpdate()
             ->first();
 
         $cashAccount = LedgerAccount::where('type', 'asset')
@@ -118,6 +223,14 @@ class LedgerPostingService
 
         if (!$merchantAccount || !$cashAccount) {
             throw new RuntimeException('No account mapping found for this payout context.');
+        }
+
+        // Calculate available payable balance under lock protection
+        $currentBalance = (int) $merchantAccount->entries()->where('type', 'credit')->sum('amount') 
+                        - (int) $merchantAccount->entries()->where('type', 'debit')->sum('amount');
+
+        if ($payout->amount > $currentBalance) {
+            throw new RuntimeException('Payout amount exceeds available merchant payable balance.');
         }
 
         return $this->post(
@@ -143,7 +256,8 @@ class LedgerPostingService
             referenceId: $payout->id,
             description: 'Automatic payout settlement for payout ' . $payout->id
         );
-    }
+    });
+}
 
     public function post(
         string $type,
@@ -175,19 +289,18 @@ class LedgerPostingService
                 $referenceId,
                 $description
             ) {
-               if ($paymentAttemptId !== null) {
+             if ($paymentAttemptId !== null && in_array($type, ['payment_capture', 'payment_chargeback'])) {
                     $existing = LedgerTransaction::where(
                         'payment_attempt_id',
                         $paymentAttemptId
-                    )->first();
+                    )
+                    ->where('type', $type)
+                    ->first();
 
                     if ($existing) {
-                        throw new RuntimeException(
-                            'Payment attempt has already been posted to the ledger.'
-                        );
+                        $label = $type === 'payment_capture' ? 'Payment attempt has already been posted to the ledger.' : 'Payment attempt has already been charged back.';
+                        throw new RuntimeException($label);
                     }
-
-                    // ... validation ...
                 }
 
                 // Add this check for generic references (like payouts)
@@ -257,6 +370,233 @@ class LedgerPostingService
             }
             throw $e;
         }
+    }
+
+    /**
+     * Post a chargeback transaction for a given payment attempt.
+     */
+    public function postChargebackFromPaymentAttempt(PaymentAttempt $paymentAttempt, int $chargebackAmount): LedgerTransaction
+    {
+        if ($chargebackAmount <= 0) {
+            throw new InvalidArgumentException('Chargeback amount must be greater than zero.');
+        }
+
+        if ($chargebackAmount > $paymentAttempt->amount) {
+            throw new InvalidArgumentException('Chargeback amount cannot exceed the original payment amount.');
+        }
+
+        // Resolve Accounts
+        $cashAccount = LedgerAccount::where('type', 'asset')
+            ->where('currency', $paymentAttempt->currency)
+            ->whereNull('merchant_id')
+            ->first();
+
+        $merchantAccount = LedgerAccount::where('type', 'liability')
+            ->where('currency', $paymentAttempt->currency)
+            ->when(isset($paymentAttempt->merchant_id), fn($q) => $q->where('merchant_id', $paymentAttempt->merchant_id))
+            ->first();
+
+        if (!$cashAccount || !$merchantAccount) {
+            throw new RuntimeException('No account mapping found for this chargeback context.');
+        }
+
+        $entries = [
+            [
+                'ledger_account_id' => $merchantAccount->id,
+                'type' => 'debit',
+                'amount' => $chargebackAmount,
+                'currency' => $paymentAttempt->currency,
+            ],
+            [
+                'ledger_account_id' => $cashAccount->id,
+                'type' => 'credit',
+                'amount' => $chargebackAmount,
+                'currency' => $paymentAttempt->currency,
+            ],
+        ];
+
+        return $this->post(
+            type: 'payment_chargeback',
+            amount: $chargebackAmount,
+            currency: $paymentAttempt->currency,
+            direction: 'debit',
+            entries: $entries,
+            paymentAttemptId: $paymentAttempt->id,
+            description: 'Chargeback for payment attempt ' . $paymentAttempt->id
+        );
+    }
+
+    /**
+     * Post a chargeback before payout, clawing funds back from the unpaid merchant balance and reversing fees.
+     */
+    public function postPrePayoutChargebackFromPaymentAttempt(PaymentAttempt $paymentAttempt, int $chargebackAmount): LedgerTransaction
+    {
+        if ($chargebackAmount <= 0) {
+            throw new InvalidArgumentException('Chargeback amount must be greater than zero.');
+        }
+
+        $cashAccount = LedgerAccount::where('type', 'asset')
+            ->where('currency', $paymentAttempt->currency)
+            ->whereNull('merchant_id')
+            ->first();
+
+        $merchantAccount = LedgerAccount::where('type', 'liability')
+            ->where('currency', $paymentAttempt->currency)
+            ->when(isset($paymentAttempt->merchant_id), fn($q) => $q->where('merchant_id', $paymentAttempt->merchant_id))
+            ->first();
+
+        $revenueAccount = LedgerAccount::where('type', 'revenue')
+            ->where('currency', $paymentAttempt->currency)
+            ->whereNull('merchant_id')
+            ->first();
+
+        if (!$cashAccount || !$merchantAccount || !$revenueAccount) {
+            throw new RuntimeException('Account mapping missing for pre-payout chargeback.');
+        }
+
+        $feeAmount = (int) ($paymentAttempt->fee_amount ?? 0);
+        $netMerchantShare = $chargebackAmount - $feeAmount;
+
+        // Entries: 
+        // Credit Cash (Bank pulls full gross amount) -> $chargebackAmount
+        // Debit Merchant Payable (Reduce what we owe them) -> $netMerchantShare
+        // Debit Platform Fee Revenue (Reverse our platform fee earnings) -> $feeAmount
+        $entries = [
+            [
+                'ledger_account_id' => $merchantAccount->id,
+                'type' => 'debit',
+                'amount' => $netMerchantShare,
+                'currency' => $paymentAttempt->currency,
+            ],
+            [
+                'ledger_account_id' => $revenueAccount->id,
+                'type' => 'debit',
+                'amount' => $feeAmount,
+                'currency' => $paymentAttempt->currency,
+            ],
+            [
+                'ledger_account_id' => $cashAccount->id,
+                'type' => 'credit',
+                'amount' => $chargebackAmount,
+                'currency' => $paymentAttempt->currency,
+            ],
+        ];
+
+        return $this->post(
+            type: 'pre_payout_chargeback',
+            amount: $chargebackAmount,
+            currency: $paymentAttempt->currency,
+            direction: 'debit',
+            entries: $entries,
+            paymentAttemptId: $paymentAttempt->id,
+            description: 'Pre-payout chargeback for payment attempt ' . $paymentAttempt->id
+        );
+    }
+
+    /**
+     * Post a chargeback reversal (merchant wins dispute) for a given payment attempt.
+     */
+    public function postChargebackReversalFromPaymentAttempt(PaymentAttempt $paymentAttempt, int $reversalAmount): LedgerTransaction
+    {
+        if ($reversalAmount <= 0) {
+            throw new InvalidArgumentException('Reversal amount must be greater than zero.');
+        }
+
+        // Resolve Accounts
+        $cashAccount = LedgerAccount::where('type', 'asset')
+            ->where('currency', $paymentAttempt->currency)
+            ->whereNull('merchant_id')
+            ->first();
+
+        $merchantAccount = LedgerAccount::where('type', 'liability')
+            ->where('currency', $paymentAttempt->currency)
+            ->when(isset($paymentAttempt->merchant_id), fn($q) => $q->where('merchant_id', $paymentAttempt->merchant_id))
+            ->first();
+
+        if (!$cashAccount || !$merchantAccount) {
+            throw new RuntimeException('No account mapping found for chargeback reversal context.');
+        }
+
+        // Entries: 
+        // Debit Cash (Clearing funds returned by bank) -> $reversalAmount
+        // Credit Merchant Payable (Cancels out the negative receivable balance) -> $reversalAmount
+        $entries = [
+            [
+                'ledger_account_id' => $cashAccount->id,
+                'type' => 'debit',
+                'amount' => $reversalAmount,
+                'currency' => $paymentAttempt->currency,
+            ],
+            [
+                'ledger_account_id' => $merchantAccount->id,
+                'type' => 'credit',
+                'amount' => $reversalAmount,
+                'currency' => $paymentAttempt->currency,
+            ],
+        ];
+
+        return $this->post(
+            type: 'chargeback_reversal',
+            amount: $reversalAmount,
+            currency: $paymentAttempt->currency,
+            direction: 'debit',
+            entries: $entries,
+            paymentAttemptId: $paymentAttempt->id,
+            description: 'Chargeback reversal (won) for payment attempt ' . $paymentAttempt->id
+        );
+    }
+
+    /**
+     * Post a chargeback/dispute fee for a given payment attempt.
+     */
+    public function postChargebackFeeFromPaymentAttempt(PaymentAttempt $paymentAttempt, int $feeAmount): LedgerTransaction
+    {
+        if ($feeAmount <= 0) {
+            throw new InvalidArgumentException('Chargeback fee amount must be greater than zero.');
+        }
+
+        // Resolve Accounts
+        $merchantAccount = LedgerAccount::where('type', 'liability')
+            ->where('currency', $paymentAttempt->currency)
+            ->when(isset($paymentAttempt->merchant_id), fn($q) => $q->where('merchant_id', $paymentAttempt->merchant_id))
+            ->first();
+
+        $revenueAccount = LedgerAccount::where('type', 'revenue')
+            ->where('currency', $paymentAttempt->currency)
+            ->whereNull('merchant_id')
+            ->first();
+
+        if (!$merchantAccount || !$revenueAccount) {
+            throw new RuntimeException('Account mapping missing for chargeback fee context.');
+        }
+
+        // Entries:
+        // Debit Merchant Payable (Reduce what we owe them due to the fee penalty) -> $feeAmount
+        // Credit Platform Fee Revenue (Platform earns the dispute fee) -> $feeAmount
+        $entries = [
+            [
+                'ledger_account_id' => $merchantAccount->id,
+                'type' => 'debit',
+                'amount' => $feeAmount,
+                'currency' => $paymentAttempt->currency,
+            ],
+            [
+                'ledger_account_id' => $revenueAccount->id,
+                'type' => 'credit',
+                'amount' => $feeAmount,
+                'currency' => $paymentAttempt->currency,
+            ],
+        ];
+
+        return $this->post(
+            type: 'chargeback_fee',
+            amount: $feeAmount,
+            currency: $paymentAttempt->currency,
+            direction: 'debit',
+            entries: $entries,
+            paymentAttemptId: $paymentAttempt->id,
+            description: 'Chargeback fee for payment attempt ' . $paymentAttempt->id
+        );
     }
 
     private function validateTransaction(
