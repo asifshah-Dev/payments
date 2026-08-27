@@ -31,8 +31,29 @@ class LedgerTransaction extends Model
     protected static function booted(): void
     {
         static::updating(function (LedgerTransaction $transaction) {
+            // 1. Prevent moving a posted transaction back to unposted/pending (POSTED -> PENDING)
+            if ($transaction->isDirty('posted_at')) {
+                $originalPostedAt = $transaction->getOriginal('posted_at');
+                
+                if ($originalPostedAt !== null && is_null($transaction->posted_at)) {
+                    throw new InvalidArgumentException(
+                        "Cannot move a posted transaction back to a pending or unposted state."
+                    );
+                }
+            }
+
+            // 2. Prevent un-reversing or re-reversing once reversed (REVERSED -> ACTIVE or REVERSED -> REVERSED)
+            if ($transaction->isDirty('reversed_at')) {
+                // If it was already reversed in the database, block any changes to reversed_at
+                if ($transaction->getOriginal('reversed_at') !== null) {
+                    throw new InvalidArgumentException(
+                        "A reversed transaction cannot be un-reversed or re-reversed."
+                    );
+                }
+            }
+
+            // 3. Block tampering with core financial attributes if posted
             if ($transaction->posted_at !== null) {
-                // Only block updates if core financial or source attributes are being modified
                 $tamperedAttributes = ['amount', 'type', 'currency', 'direction', 'source_type', 'source_id'];
 
                 foreach ($tamperedAttributes as $attribute) {
