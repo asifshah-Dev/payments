@@ -28,9 +28,42 @@ class LedgerTransaction extends Model
     /**
      * The "booted" method of the model.
      */
-    protected static function booted(): void
+   protected static function booted(): void
     {
+        static::creating(function (LedgerTransaction $transaction) {
+            if ($transaction->posted_at) {
+                $postedDate = $transaction->posted_at->format('YYYY-mm-dd'); // or standard date string
+                
+                if (\Illuminate\Support\Facades\Schema::hasTable('accounting_periods')) {
+                    $isClosed = \Illuminate\Support\Facades\DB::table('accounting_periods')
+                        ->where('status', 'closed')
+                        ->whereDate('start_date', '<=', $transaction->posted_at)
+                        ->whereDate('end_date', '>=', $transaction->posted_at)
+                        ->exists();
+
+                    if ($isClosed) {
+                        throw new InvalidArgumentException("Cannot post a transaction into a closed accounting period.");
+                    }
+                }
+            }
+        });
+
         static::updating(function (LedgerTransaction $transaction) {
+            // Check if existing or new posted_at falls in a closed period
+            $targetDate = $transaction->posted_at ?? $transaction->getOriginal('posted_at');
+            
+            if ($targetDate && \Illuminate\Support\Facades\Schema::hasTable('accounting_periods')) {
+                $isClosed = \Illuminate\Support\Facades\DB::table('accounting_periods')
+                    ->where('status', 'closed')
+                    ->whereDate('start_date', '<=', $targetDate)
+                    ->whereDate('end_date', '>=', $targetDate)
+                    ->exists();
+
+                if ($isClosed) {
+                    throw new InvalidArgumentException("Cannot modify a transaction within a closed accounting period.");
+                }
+            }
+
             // 1. Prevent moving a posted transaction back to unposted/pending (POSTED -> PENDING)
             if ($transaction->isDirty('posted_at')) {
                 $originalPostedAt = $transaction->getOriginal('posted_at');
@@ -44,7 +77,6 @@ class LedgerTransaction extends Model
 
             // 2. Prevent un-reversing or re-reversing once reversed (REVERSED -> ACTIVE or REVERSED -> REVERSED)
             if ($transaction->isDirty('reversed_at')) {
-                // If it was already reversed in the database, block any changes to reversed_at
                 if ($transaction->getOriginal('reversed_at') !== null) {
                     throw new InvalidArgumentException(
                         "A reversed transaction cannot be un-reversed or re-reversed."
