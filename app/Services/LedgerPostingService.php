@@ -17,9 +17,6 @@ class LedgerPostingService
     /**
      * Automatically resolve context mapping and post from a payment attempt.
      */
-   /**
-     * Automatically resolve context mapping and post from a payment attempt.
-     */
     public function postFromPaymentAttempt(PaymentAttempt $paymentAttempt): LedgerTransaction
     {
         if ($paymentAttempt->status !== 'succeeded') {
@@ -117,7 +114,7 @@ class LedgerPostingService
         }
 
         $feeAmount = $paymentAttempt->fee_amount ?? 0;
-        
+
         // Calculate pro-rata fee reversal based on the original payment amount ratio
         $feeRefundAmount = 0;
         if ($feeAmount > 0 && $paymentAttempt->amount > 0) {
@@ -202,62 +199,118 @@ class LedgerPostingService
     /**
      * Automatically resolve context mapping and post from a payout.
      */
-  public function postFromPayout(Payout $payout): LedgerTransaction
-{
-    return DB::transaction(function () use ($payout) {
-        if ($payout->status !== 'completed') {
-            throw new RuntimeException('Cannot post ledger transaction for a non-completed payout.');
-        }
+    public function postFromPayout(Payout $payout): LedgerTransaction
+    {
+        return DB::transaction(function () use ($payout) {
+            if ($payout->status !== 'completed') {
+                throw new RuntimeException('Cannot post ledger transaction for a non-completed payout.');
+            }
 
-        // Lock the merchant liability account row for update to prevent race conditions
-        $merchantAccount = LedgerAccount::where('type', 'liability')
-            ->where('currency', $payout->currency)
-            ->where('merchant_id', $payout->merchant_id)
-            ->lockForUpdate()
-            ->first();
+            // Lock the merchant liability account row for update to prevent race conditions
+            $merchantAccount = LedgerAccount::where('type', 'liability')
+                ->where('currency', $payout->currency)
+                ->where('merchant_id', $payout->merchant_id)
+                ->lockForUpdate()
+                ->first();
 
-        $cashAccount = LedgerAccount::where('type', 'asset')
-            ->where('currency', $payout->currency)
-            ->whereNull('merchant_id')
-            ->first();
+            $cashAccount = LedgerAccount::where('type', 'asset')
+                ->where('currency', $payout->currency)
+                ->whereNull('merchant_id')
+                ->first();
 
-        if (!$merchantAccount || !$cashAccount) {
-            throw new RuntimeException('No account mapping found for this payout context.');
-        }
+            if (!$merchantAccount || !$cashAccount) {
+                throw new RuntimeException('No account mapping found for this payout context.');
+            }
 
-        // Calculate available payable balance under lock protection
-        $currentBalance = (int) $merchantAccount->entries()->where('type', 'credit')->sum('amount') 
-                        - (int) $merchantAccount->entries()->where('type', 'debit')->sum('amount');
+            // Calculate available payable balance under lock protection
+            $currentBalance = (int) $merchantAccount->entries()->where('type', 'credit')->sum('amount')
+                - (int) $merchantAccount->entries()->where('type', 'debit')->sum('amount');
 
-        if ($payout->amount > $currentBalance) {
-            throw new RuntimeException('Payout amount exceeds available merchant payable balance.');
-        }
+            if ($payout->amount > $currentBalance) {
+                throw new RuntimeException('Payout amount exceeds available merchant payable balance.');
+            }
 
-        return $this->post(
-            type: 'merchant_payout',
-            amount: $payout->amount,
-            currency: $payout->currency,
-            direction: 'debit',
-            entries: [
-                [
-                    'ledger_account_id' => $merchantAccount->id,
-                    'type' => 'debit',
-                    'amount' => $payout->amount,
-                    'currency' => $payout->currency,
+            return $this->post(
+                type: 'merchant_payout',
+                amount: $payout->amount,
+                currency: $payout->currency,
+                direction: 'debit',
+                entries: [
+                    [
+                        'ledger_account_id' => $merchantAccount->id,
+                        'type' => 'debit',
+                        'amount' => $payout->amount,
+                        'currency' => $payout->currency,
+                    ],
+                    [
+                        'ledger_account_id' => $cashAccount->id,
+                        'type' => 'credit',
+                        'amount' => $payout->amount,
+                        'currency' => $payout->currency,
+                    ],
                 ],
-                [
-                    'ledger_account_id' => $cashAccount->id,
-                    'type' => 'credit',
-                    'amount' => $payout->amount,
-                    'currency' => $payout->currency,
-                ],
-            ],
-            referenceType: 'payout',
-            referenceId: $payout->id,
-            description: 'Automatic payout settlement for payout ' . $payout->id
-        );
-    });
-}
+                referenceType: 'payout',
+                referenceId: $payout->id,
+                description: 'Automatic payout settlement for payout ' . $payout->id
+            );
+        });
+    }
+
+    public function reverse(LedgerTransaction $transaction, ?string $description = null): LedgerTransaction
+    {
+        return DB::transaction(function () use ($transaction, $description) {
+            // 1. Enforce single-reversal guard
+            $existingReversal = LedgerTransaction::where('reference_type', 'reversal')
+                ->where('reference_id', (string) $transaction->id)
+                ->first();
+
+            if ($existingReversal) {
+                throw new RuntimeException('This ledger transaction has already been reversed.');
+            }
+
+            // 2. Load the original entries
+            $transaction->loadMissing('entries');
+
+            if ($transaction->entries->isEmpty()) {
+                throw new RuntimeException('Cannot reverse a transaction with no entries.');
+            }
+
+            // 3. Mirror every entry (swap debit <-> credit) and calculate integer debit total
+            $mirroredEntries = [];
+            $debitTotal = 0;
+
+            foreach ($transaction->entries as $entry) {
+                $newType = $entry->type === 'debit' ? 'credit' : 'debit';
+                $amount = (int) $entry->amount;
+
+                $mirroredEntries[] = [
+                    'ledger_account_id' => $entry->ledger_account_id,
+                    'type' => $newType,
+                    'amount' => $amount,
+                    'currency' => $entry->currency,
+                ];
+
+                if ($newType === 'debit') {
+                    $debitTotal += $amount;
+                }
+            }
+
+            // 4. Determine the opposite top-level direction
+            $reversedDirection = $transaction->direction === 'debit' ? 'credit' : 'debit';
+
+            // 5. Post the reversal using the calculated integer amount
+            return $this->post(
+                type: $transaction->type . '_reversal',
+                amount: (int) $debitTotal, 
+                currency: $transaction->currency,
+                direction: $reversedDirection,
+                entries: $mirroredEntries,
+                referenceType: 'reversal',
+                referenceId: (string) $transaction->id,
+                description: $description ?? 'Reversal of transaction ' . $transaction->id
+            );
+        });
+    }
 
     public function post(
         string $type,
@@ -289,13 +342,13 @@ class LedgerPostingService
                 $referenceId,
                 $description
             ) {
-             if ($paymentAttemptId !== null && in_array($type, ['payment_capture', 'payment_chargeback'])) {
+                if ($paymentAttemptId !== null && in_array($type, ['payment_capture', 'payment_chargeback'])) {
                     $existing = LedgerTransaction::where(
                         'payment_attempt_id',
                         $paymentAttemptId
                     )
-                    ->where('type', $type)
-                    ->first();
+                        ->where('type', $type)
+                        ->first();
 
                     if ($existing) {
                         $label = $type === 'payment_capture' ? 'Payment attempt has already been posted to the ledger.' : 'Payment attempt has already been charged back.';
@@ -457,10 +510,6 @@ class LedgerPostingService
         $feeAmount = (int) ($paymentAttempt->fee_amount ?? 0);
         $netMerchantShare = $chargebackAmount - $feeAmount;
 
-        // Entries: 
-        // Credit Cash (Bank pulls full gross amount) -> $chargebackAmount
-        // Debit Merchant Payable (Reduce what we owe them) -> $netMerchantShare
-        // Debit Platform Fee Revenue (Reverse our platform fee earnings) -> $feeAmount
         $entries = [
             [
                 'ledger_account_id' => $merchantAccount->id,
@@ -517,9 +566,6 @@ class LedgerPostingService
             throw new RuntimeException('No account mapping found for chargeback reversal context.');
         }
 
-        // Entries: 
-        // Debit Cash (Clearing funds returned by bank) -> $reversalAmount
-        // Credit Merchant Payable (Cancels out the negative receivable balance) -> $reversalAmount
         $entries = [
             [
                 'ledger_account_id' => $cashAccount->id,
@@ -570,9 +616,6 @@ class LedgerPostingService
             throw new RuntimeException('Account mapping missing for chargeback fee context.');
         }
 
-        // Entries:
-        // Debit Merchant Payable (Reduce what we owe them due to the fee penalty) -> $feeAmount
-        // Credit Platform Fee Revenue (Platform earns the dispute fee) -> $feeAmount
         $entries = [
             [
                 'ledger_account_id' => $merchantAccount->id,
@@ -663,12 +706,12 @@ class LedgerPostingService
 
             if ($entry['type'] === 'debit') {
                 $hasDebit = true;
-                $debitTotal += $entry['amount'];
+                $debitTotal += (int) $entry['amount'];
             }
 
             if ($entry['type'] === 'credit') {
                 $hasCredit = true;
-                $creditTotal += $entry['amount'];
+                $creditTotal += (int) $entry['amount'];
             }
         }
 
@@ -684,13 +727,13 @@ class LedgerPostingService
             );
         }
 
-        if ($debitTotal !== $creditTotal) {
+        if ((int) $debitTotal !== (int) $creditTotal) {
             throw new InvalidArgumentException(
                 'Ledger transaction is not balanced.'
             );
         }
 
-        if ($debitTotal !== $amount) {
+        if ((int) $debitTotal !== (int) $amount) {
             throw new InvalidArgumentException(
                 'Ledger entry total must match transaction amount.'
             );
