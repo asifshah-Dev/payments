@@ -27,7 +27,7 @@ class LedgerEntry extends Model
     {
         static::creating(function ($ledgerEntry) {
             // 1. Verify parent transaction is not posted (entries cannot be added to a posted transaction)
-            $transaction = $ledgerEntry->ledgerTransaction ?? \App\Models\LedgerTransaction::find($ledgerEntry->ledger_transaction_id);
+            $transaction = $ledgerEntry->transaction ?? \App\Models\LedgerTransaction::find($ledgerEntry->ledger_transaction_id);
 
             if ($transaction && $transaction->posted_at !== null) {
                 throw new \InvalidArgumentException(
@@ -61,7 +61,7 @@ class LedgerEntry extends Model
                 );
             }
 
-            $account = $ledgerEntry->ledgerAccount ?? \App\Models\LedgerAccount::find($ledgerEntry->ledger_account_id);
+            $account = $ledgerEntry->account ?? \App\Models\LedgerAccount::find($ledgerEntry->ledger_account_id);
 
             if ($account && $ledgerEntry->currency !== $account->currency) {
                 throw new \InvalidArgumentException(
@@ -74,6 +74,39 @@ class LedgerEntry extends Model
                     "Cannot create entry on a {$account->status} ledger account."
                 );
             }
+
+            // --- Merchant Ownership & Isolation Guard ---
+            if ($account && $account->merchant_id && $transaction) {
+                $existingEntries = $transaction->entries()->with('account')->get();
+
+                foreach ($existingEntries as $existingEntry) {
+                    if ($existingEntry->id !== $ledgerEntry->id && $existingEntry->account && $existingEntry->account->merchant_id) {
+                        if ($existingEntry->account->merchant_id !== $account->merchant_id) {
+                            throw new \InvalidArgumentException(
+                                "Ledger entry cannot mix accounts from different merchants in a single transaction."
+                            );
+                        }
+                    }
+                }
+
+                if ($transaction->source) {
+                    $sourceMerchantId = null;
+
+                    if (isset($transaction->source->merchant_id)) {
+                        $sourceMerchantId = $transaction->source->merchant_id;
+                    } elseif (method_exists($transaction->source, 'paymentIntent') && $transaction->source->paymentIntent) {
+                        $sourceMerchantId = $transaction->source->paymentIntent->merchant_id;
+                    } elseif ($transaction->source instanceof Merchant) {
+                        $sourceMerchantId = $transaction->source->id;
+                    }
+
+                    if ($sourceMerchantId && $account->merchant_id !== $sourceMerchantId) {
+                        throw new \InvalidArgumentException(
+                            "Ledger entry account merchant does not match transaction source merchant."
+                        );
+                    }
+                }
+            }
         });
 
         static::updating(function ($ledgerEntry) {
@@ -83,7 +116,7 @@ class LedgerEntry extends Model
             }
 
             // 1. Verify parent transaction is not posted (posted entries cannot be modified)
-            $transaction = $ledgerEntry->ledgerTransaction ?? \App\Models\LedgerTransaction::find($ledgerEntry->ledger_transaction_id);
+            $transaction = $ledgerEntry->transaction ?? \App\Models\LedgerTransaction::find($ledgerEntry->ledger_transaction_id);
 
             if ($transaction && $transaction->posted_at !== null) {
                 throw new \InvalidArgumentException(
@@ -112,7 +145,7 @@ class LedgerEntry extends Model
                 );
             }
 
-            $account = $ledgerEntry->ledgerAccount ?? \App\Models\LedgerAccount::find($ledgerEntry->ledger_account_id);
+            $account = $ledgerEntry->account ?? \App\Models\LedgerAccount::find($ledgerEntry->ledger_account_id);
 
             if (($ledgerEntry->isDirty('currency') || $ledgerEntry->isDirty('ledger_account_id')) && $account && $ledgerEntry->currency !== $account->currency) {
                 throw new \InvalidArgumentException(
@@ -125,10 +158,43 @@ class LedgerEntry extends Model
                     "Cannot create entry on a {$account->status} ledger account."
                 );
             }
+
+            // --- Merchant Ownership & Isolation Guard ---
+            if ($account && $account->merchant_id && $transaction) {
+                $existingEntries = $transaction->entries()->with('account')->get();
+
+                foreach ($existingEntries as $existingEntry) {
+                    if ($existingEntry->id !== $ledgerEntry->id && $existingEntry->account && $existingEntry->account->merchant_id) {
+                        if ($existingEntry->account->merchant_id !== $account->merchant_id) {
+                            throw new \InvalidArgumentException(
+                                "Ledger entry cannot mix accounts from different merchants in a single transaction."
+                            );
+                        }
+                    }
+                }
+
+                if ($transaction->source) {
+                    $sourceMerchantId = null;
+
+                    if (isset($transaction->source->merchant_id)) {
+                        $sourceMerchantId = $transaction->source->merchant_id;
+                    } elseif (method_exists($transaction->source, 'paymentIntent') && $transaction->source->paymentIntent) {
+                        $sourceMerchantId = $transaction->source->paymentIntent->merchant_id;
+                    } elseif ($transaction->source instanceof Merchant) {
+                        $sourceMerchantId = $transaction->source->id;
+                    }
+
+                    if ($sourceMerchantId && $account->merchant_id !== $sourceMerchantId) {
+                        throw new \InvalidArgumentException(
+                            "Ledger entry account merchant does not match transaction source merchant."
+                        );
+                    }
+                }
+            }
         });
 
         static::deleting(function ($ledgerEntry) {
-            $transaction = $ledgerEntry->ledgerTransaction ?? \App\Models\LedgerTransaction::find($ledgerEntry->ledger_transaction_id);
+            $transaction = $ledgerEntry->transaction ?? \App\Models\LedgerTransaction::find($ledgerEntry->ledger_transaction_id);
 
             if ($transaction && $transaction->posted_at !== null) {
                 throw new \InvalidArgumentException(
