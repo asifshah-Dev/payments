@@ -41,12 +41,14 @@ class PaymentRecoveryManager
 
     public function postAtomicallyWithForcedFailure(int $paymentId): void
     {
-        DB::beginTransaction();
-
-        try {
+        DB::transaction(function () use ($paymentId) {
             $payment = DB::table('recovery_payments')
                 ->where('id', $paymentId)
                 ->first();
+
+            if (!$payment) {
+                throw new RuntimeException('Payment not found');
+            }
 
             DB::table('recovery_ledger_transactions')->insert([
                 'payment_id' => $payment->id,
@@ -58,12 +60,8 @@ class PaymentRecoveryManager
                 'updated_at' => now(),
             ]);
 
-            throw new RuntimeException('FORCED FAILURE');
-        } catch (\Throwable $e) {
-            DB::rollBack();
-
-            throw $e;
-        }
+            throw new RuntimeException('Forced failure midway');
+        });
     }
 
     public function getStuckPayments(): Collection
