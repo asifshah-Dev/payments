@@ -12,29 +12,25 @@ return new class extends Migration
     public function up(): void
     {
         Schema::create('payment_intents', function (Blueprint $table) {
-    $table->uuid('id')->primary();
+            $table->charset = 'utf8mb4';
+            $table->collation = 'utf8mb4_unicode_ci';
 
-    $table->foreignUuid('merchant_id')
-        ->constrained('merchants')
-        ->restrictOnDelete();
+            $table->uuid('id')->primary();
 
-    $table->unsignedBigInteger('amount');
+            $table->foreignUuid('merchant_id')
+                ->constrained('merchants')
+                ->restrictOnDelete();
 
-    $table->char('currency', 3);
+            $table->unsignedBigInteger('amount');
+            $table->char('currency', 3);
+            $table->text('description')->nullable();
+            $table->string('status')->default('pending');
+            $table->string('idempotency_key');
+            $table->char('request_hash', 64);
+            $table->timestamps();
 
-    $table->text('description')->nullable();
-
-    $table->string('status')->default('pending');
-
-    $table->string('idempotency_key');
-
-    $table->char('request_hash', 64);
-
-    $table->timestamps();
-
-    $table->unique(['merchant_id', 'idempotency_key']);
-});
-
+            $table->unique(['merchant_id', 'idempotency_key']);
+        });
     }
 
     /**

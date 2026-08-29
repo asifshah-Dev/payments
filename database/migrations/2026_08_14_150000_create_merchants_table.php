@@ -1,7 +1,3 @@
-
-
-
-
 <?php
 
 use Illuminate\Database\Migrations\Migration;
@@ -16,10 +12,13 @@ return new class extends Migration
     public function up(): void
     {
         Schema::create('merchants', function (Blueprint $table) {
+            $table->charset = 'utf8mb4';
+            $table->collation = 'utf8mb4_unicode_ci';
+
             $table->uuid('id')->primary();
-            $table->string('name', 150); // Enforced name constraints
-            $table->string('email', 255)->unique(); // Web-safe unique email index limit
-            $table->string('status')->default('active'); // Flexible string status
+            $table->string('name', 150);
+            $table->string('email', 255)->unique();
+            $table->string('status')->default('active');
             $table->timestamps();
         });
     }
