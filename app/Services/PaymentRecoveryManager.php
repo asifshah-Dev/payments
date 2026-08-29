@@ -34,6 +34,7 @@ class PaymentRecoveryManager
             try {
                 DB::table('recovery_ledger_transactions')->insert([
                     'payment_id' => $payment->id,
+                    'merchant_id' => $payment->merchant_id ?? 1,
                     'amount' => $payment->amount,
                     'currency' => $payment->currency,
                     'direction' => 'debit',
@@ -51,6 +52,43 @@ class PaymentRecoveryManager
 
             return true;
         });
+    }
+
+    public function postLedgerEntry(int $paymentId, string $type, string $direction, int $amount, string $currency = 'USD', int $merchantId = 1): bool
+    {
+        return DB::transaction(function () use ($paymentId, $type, $direction, $amount, $currency, $merchantId) {
+            DB::table('recovery_ledger_transactions')->insert([
+                'payment_id' => $paymentId,
+                'merchant_id' => $merchantId,
+                'amount' => $amount,
+                'currency' => $currency,
+                'direction' => $direction,
+                'type' => $type,
+                'posted_at' => now(),
+                'created_at' => now(),
+                'updated_at' => now(),
+            ]);
+            return true;
+        });
+    }
+
+    public function calculateBalance(int $merchantId, string $currency = 'USD'): int
+    {
+        $transactions = DB::table('recovery_ledger_transactions')
+            ->where('merchant_id', $merchantId)
+            ->where('currency', $currency)
+            ->get();
+
+        $balance = 0;
+        foreach ($transactions as $tx) {
+            if ($tx->direction === 'debit') {
+                $balance += (int) $tx->amount;
+            } else {
+                $balance -= (int) $tx->amount;
+            }
+        }
+
+        return $balance;
     }
 
     public function postRefund(int $paymentId, int $refundAmount): bool
@@ -72,6 +110,7 @@ class PaymentRecoveryManager
 
             DB::table('recovery_ledger_transactions')->insert([
                 'payment_id' => $payment->id,
+                'merchant_id' => $payment->merchant_id ?? 1,
                 'amount' => $refundAmount,
                 'currency' => $payment->currency,
                 'direction' => 'credit',
@@ -92,7 +131,7 @@ class PaymentRecoveryManager
     {
         return DB::transaction(function () use ($paymentId) {
             $payment = DB::table('recovery_payments')->where('id', $paymentId)->lockForUpdate()->first();
-            if (!$payment || $payment->status !== 'succeeded') {
+            if (!$payment || !in_array($payment->status, ['succeeded', 'partial_refunded'])) {
                 throw new InvalidArgumentException('Payment must be succeeded to chargeback.');
             }
 
@@ -107,6 +146,7 @@ class PaymentRecoveryManager
 
             DB::table('recovery_ledger_transactions')->insert([
                 'payment_id' => $payment->id,
+                'merchant_id' => $payment->merchant_id ?? 1,
                 'amount' => $payment->amount,
                 'currency' => $payment->currency,
                 'direction' => 'credit',
@@ -132,6 +172,7 @@ class PaymentRecoveryManager
 
             DB::table('recovery_ledger_transactions')->insert([
                 'payment_id' => $payment->id,
+                'merchant_id' => $payment->merchant_id ?? 1,
                 'amount' => $payment->amount,
                 'currency' => $payment->currency,
                 'direction' => 'debit',
@@ -189,33 +230,6 @@ class PaymentRecoveryManager
         return true;
     }
 
-    public function postAtomicallyWithForcedFailure(int $paymentId): void
-    {
-        DB::transaction(function () use ($paymentId) {
-            $payment = DB::table('recovery_payments')
-                ->where('id', $paymentId)
-                ->lockForUpdate()
-                ->first();
-
-            if (!$payment) {
-                throw new RuntimeException('Payment not found');
-            }
-
-            DB::table('recovery_ledger_transactions')->insert([
-                'payment_id' => $payment->id,
-                'amount' => $payment->amount,
-                'currency' => $payment->currency,
-                'direction' => 'debit',
-                'type' => 'capture',
-                'posted_at' => now(),
-                'created_at' => now(),
-                'updated_at' => now(),
-            ]);
-
-            throw new RuntimeException('Forced failure midway');
-        });
-    }
-
     public function getStuckPayments(): Collection
     {
         return DB::table('recovery_payments')->where('status', 'stuck')->get();
@@ -238,6 +252,7 @@ class PaymentRecoveryManager
                 try {
                     DB::table('recovery_ledger_transactions')->insert([
                         'payment_id' => $payment->id,
+                        'merchant_id' => $payment->merchant_id ?? 1,
                         'amount' => $payment->amount,
                         'currency' => $payment->currency,
                         'direction' => 'debit',
