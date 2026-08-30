@@ -1,92 +1,321 @@
 <?php
 
-use Illuminate\Http\Request;
-use Illuminate\Support\Facades\Route;
-use Illuminate\Support\Facades\DB;
+use App\Models\Merchant;
 use App\Models\PaymentIntent;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Route;
+use Illuminate\Support\Str;
 
-Route::post('/payment-intents', function (Request $request) {
-    // 1. Validate headers & request payload according to the idempotency contract
-    $validated = $request->validate([
-        'amount' => 'required|integer|min:1',
-        'currency' => 'required|string|size:3',
-        'description' => 'nullable|string',
-    ]);
+/*
+|--------------------------------------------------------------------------
+| Payment Intent API
+|--------------------------------------------------------------------------
+*/
 
-    $idempotencyKey = trim((string) $request->header('X-Idempotency-Key'));
-    $merchantId = $request->header('X-Merchant-Id');
+Route::prefix('v1')->group(function () {
 
-    if (empty($idempotencyKey) || empty($merchantId)) {
-        return response()->json(['message' => 'Missing required idempotency key or merchant id header.'], 422);
-    }
+    Route::post('/payment-intents', function (Request $request) {
 
-    // 2. Normalize and generate request fingerprint/hash
-    $normalizedPayload = [
-        'amount' => $validated['amount'],
-        'currency' => strtoupper($validated['currency']),
-        'description' => $validated['description'] ?? null,
-    ];
-    
-    // Sort keys to ensure deterministic hashing regardless of key ordering
-    ksort($normalizedPayload);
-    $requestHash = hash('sha256', json_encode($normalizedPayload));
+        /*
+        |--------------------------------------------------------------------------
+        | 1. Authenticate merchant
+        |--------------------------------------------------------------------------
+        |
+        | Test contract:
+        | Authorization: Bearer test-token-{merchant_id}
+        |
+        */
 
-    // 3. Handle idempotency lookup with concurrency safety
-    return DB::transaction(function () use ($merchantId, $idempotencyKey, $requestHash, $normalizedPayload) {
-        
-        // Lock or fetch existing idempotency record scoped strictly to the merchant
-        $existing = DB::table('idempotency_keys')
-            ->where('merchant_id', $merchantId)
-            ->where('idempotency_key', $idempotencyKey)
-            ->lockForUpdate()
+        $authorization = $request->header('Authorization');
+
+        if (!$authorization || !str_starts_with($authorization, 'Bearer ')) {
+            return response()->json([
+                'message' => 'Unauthenticated.',
+            ], 401);
+        }
+
+        $token = trim(substr($authorization, 7));
+
+        if (!str_starts_with($token, 'test-token-')) {
+            return response()->json([
+                'message' => 'Unauthenticated.',
+            ], 401);
+        }
+
+        $merchantId = substr($token, strlen('test-token-'));
+
+        if (!Str::isUuid($merchantId)) {
+            return response()->json([
+                'message' => 'Unauthenticated.',
+            ], 401);
+        }
+
+        $merchant = Merchant::where('id', $merchantId)
+            ->where('status', 'active')
             ->first();
 
-        if ($existing) {
-            // Conflict check: Same key used with a different request payload fingerprint
-            if ($existing->request_hash !== $requestHash) {
-                return response()->json(['message' => 'Idempotency key already used with different parameters.'], 422);
-            }
-
-            // Return cached previous response
-            $responseData = json_decode($existing->response_body, true);
-            return response()->json($responseData, $existing->response_code);
+        if (!$merchant) {
+            return response()->json([
+                'message' => 'Unauthenticated.',
+            ], 401);
         }
 
-        // Simulate failure handling if flag is present in test payload
-        if (request()->has('simulate_failure')) {
-            return response()->json(['message' => 'Simulated failure'], 400);
+        /*
+        |--------------------------------------------------------------------------
+        | 2. Validate Idempotency-Key
+        |--------------------------------------------------------------------------
+        */
+
+        $idempotencyKey = trim(
+            (string) $request->header('Idempotency-Key')
+        );
+
+        if ($idempotencyKey === '') {
+            return response()->json([
+                'message' => 'The Idempotency-Key header is required.',
+            ], 422);
         }
 
-        // Create the actual Payment Intent record
-        $paymentIntent = PaymentIntent::create([
-            'merchant_id' => $merchantId,
-            'amount' => $normalizedPayload['amount'],
-            'currency' => $normalizedPayload['currency'],
-            'description' => $normalizedPayload['description'],
-            'status' => 'pending',
+        if (!Str::isUuid($idempotencyKey)) {
+            return response()->json([
+                'message' => 'The Idempotency-Key must be a valid UUID.',
+            ], 422);
+        }
+
+        /*
+        |--------------------------------------------------------------------------
+        | 3. Validate request body
+        |--------------------------------------------------------------------------
+        */
+
+        $validated = $request->validate([
+            'amount' => [
+                'required',
+                'integer',
+                'min:1',
+            ],
+
+            'currency' => [
+                'required',
+                'string',
+                'size:3',
+                'in:USD,EUR,GBP,PKR,AED,SAR,JPY,CAD,AUD,CHF,CNY,INR',
+            ],
+
+            'description' => [
+                'nullable',
+                'string',
+            ],
         ]);
 
-        $responseBody = [
-            'data' => [
-                'id' => $paymentIntent->id,
-                'status' => $paymentIntent->status,
-                'amount' => $paymentIntent->amount,
-                'currency' => $paymentIntent->currency,
-                'description' => $paymentIntent->description,
-            ]
+        /*
+        |--------------------------------------------------------------------------
+        | 4. Normalize request
+        |--------------------------------------------------------------------------
+        */
+
+        $normalizedPayload = [
+            'amount' => $validated['amount'],
+            'currency' => strtoupper($validated['currency']),
+            'description' => $validated['description'] ?? null,
         ];
 
-        // Store idempotency log
-        DB::table('idempotency_keys')->insert([
-            'merchant_id' => $merchantId,
-            'idempotency_key' => $idempotencyKey,
-            'request_hash' => $requestHash,
-            'response_code' => 201,
-            'response_body' => json_encode($responseBody),
-            'created_at' => now(),
-            'updated_at' => now(),
-        ]);
+        /*
+        |--------------------------------------------------------------------------
+        | 5. Generate deterministic request fingerprint
+        |--------------------------------------------------------------------------
+        |
+        | IMPORTANT:
+        | This must match the test:
+        |
+        | json_encode([
+        |     'amount' => ...,
+        |     'currency' => ...,
+        |     'description' => ...
+        | ])
+        |
+        */
 
-        return response()->json($responseBody, 201);
+        $requestHash = hash(
+            'sha256',
+            json_encode($normalizedPayload)
+        );
+
+        /*
+        |--------------------------------------------------------------------------
+        | 6. Idempotency + PaymentIntent creation
+        |--------------------------------------------------------------------------
+        */
+
+        return DB::transaction(function () use (
+            $merchant,
+            $idempotencyKey,
+            $requestHash,
+            $normalizedPayload
+        ) {
+
+            /*
+            |--------------------------------------------------------------------------
+            | Find an existing PaymentIntent for this merchant + idempotency key
+            |--------------------------------------------------------------------------
+            */
+
+            $existing = PaymentIntent::where(
+                'merchant_id',
+                $merchant->id
+            )
+                ->where(
+                    'idempotency_key',
+                    $idempotencyKey
+                )
+                ->lockForUpdate()
+                ->first();
+
+            /*
+            |--------------------------------------------------------------------------
+            | Existing request
+            |--------------------------------------------------------------------------
+            */
+
+            if ($existing) {
+
+                /*
+                |--------------------------------------------------------------------------
+                | Same key but different request
+                |--------------------------------------------------------------------------
+                */
+
+                if ($existing->request_hash !== $requestHash) {
+                    return response()->json([
+                        'message' =>
+                            'Idempotency key already used with different parameters.',
+                    ], 409);
+                }
+
+                /*
+                |--------------------------------------------------------------------------
+                | Same key + same request
+                |--------------------------------------------------------------------------
+                |
+                | Return the SAME payment intent.
+                |
+                */
+
+                return response()->json([
+                    'id' => $existing->id,
+                    'amount' => $existing->amount,
+                    'currency' => $existing->currency,
+                    'status' => $existing->status,
+                    'description' => $existing->description,
+                ], 201);
+            }
+
+            /*
+            |--------------------------------------------------------------------------
+            | 7. Create PaymentIntent
+            |--------------------------------------------------------------------------
+            */
+
+            $paymentIntent = PaymentIntent::create([
+                'merchant_id' => $merchant->id,
+                'amount' => $normalizedPayload['amount'],
+                'currency' => $normalizedPayload['currency'],
+                'description' => $normalizedPayload['description'],
+                'status' => 'pending',
+                'idempotency_key' => $idempotencyKey,
+                'request_hash' => $requestHash,
+            ]);
+
+            /*
+            |--------------------------------------------------------------------------
+            | 8. Return only public business fields
+            |--------------------------------------------------------------------------
+            */
+
+            return response()->json([
+                'id' => $paymentIntent->id,
+                'amount' => $paymentIntent->amount,
+                'currency' => $paymentIntent->currency,
+                'status' => $paymentIntent->status,
+                'description' => $paymentIntent->description,
+            ], 201);
+        });
+    });
+
+    /*
+    |--------------------------------------------------------------------------
+    | Get Payment Intent
+    |--------------------------------------------------------------------------
+    */
+
+    Route::get('/payment-intents/{id}', function (
+        Request $request,
+        string $id
+    ) {
+
+        /*
+        |--------------------------------------------------------------------------
+        | Authenticate merchant
+        |--------------------------------------------------------------------------
+        */
+
+        $authorization = $request->header('Authorization');
+
+        if (!$authorization || !str_starts_with($authorization, 'Bearer ')) {
+            return response()->json([
+                'message' => 'Unauthenticated.',
+            ], 401);
+        }
+
+        $token = trim(substr($authorization, 7));
+
+        if (!str_starts_with($token, 'test-token-')) {
+            return response()->json([
+                'message' => 'Unauthenticated.',
+            ], 401);
+        }
+
+        $merchantId = substr($token, strlen('test-token-'));
+
+        if (!Str::isUuid($merchantId)) {
+            return response()->json([
+                'message' => 'Unauthenticated.',
+            ], 401);
+        }
+
+        $merchant = Merchant::where('id', $merchantId)
+            ->where('status', 'active')
+            ->first();
+
+        if (!$merchant) {
+            return response()->json([
+                'message' => 'Unauthenticated.',
+            ], 401);
+        }
+
+        /*
+        |--------------------------------------------------------------------------
+        | Merchant isolation
+        |--------------------------------------------------------------------------
+        */
+
+        $paymentIntent = PaymentIntent::where('id', $id)
+            ->where('merchant_id', $merchant->id)
+            ->first();
+
+        if (!$paymentIntent) {
+            return response()->json([
+                'message' => 'Payment intent not found.',
+            ], 404);
+        }
+
+        return response()->json([
+            'id' => $paymentIntent->id,
+            'amount' => $paymentIntent->amount,
+            'currency' => $paymentIntent->currency,
+            'status' => $paymentIntent->status,
+            'description' => $paymentIntent->description,
+        ]);
     });
 });

@@ -2,38 +2,74 @@
 
 namespace App\Models;
 
-
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
-use Illuminate\Database\Eloquent\Concerns\HasUuids;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
-use Illuminate\Database\Eloquent\Relations\HasMany;
-use App\Models\PaymentAttempt;
+use Illuminate\Support\Str;
+
 class PaymentIntent extends Model
 {
-        use HasFactory;
-        use HasUuids;
+    use HasFactory;
 
-        
+    protected $table = 'payment_intents';
+
+    /*
+    |--------------------------------------------------------------------------
+    | UUID configuration
+    |--------------------------------------------------------------------------
+    */
+
+    public $incrementing = false;
+
+    protected $keyType = 'string';
+
+    protected static function booted(): void
+    {
+        static::creating(function (PaymentIntent $paymentIntent) {
+            if (!$paymentIntent->id) {
+                $paymentIntent->id = (string) Str::uuid();
+            }
+        });
+    }
+
+    /*
+    |--------------------------------------------------------------------------
+    | Mass assignable fields
+    |--------------------------------------------------------------------------
+    */
 
     protected $fillable = [
-        'merchant_id', 'amount', 'currency', 'description', 
-        'status', 'idempotency_key', 'request_hash'
+        'merchant_id',
+        'amount',
+        'currency',
+        'description',
+        'status',
+        'idempotency_key',
+        'request_hash',
     ];
 
-    /**
-     * Get the merchant that owns this payment intent.
-     */
+    /*
+    |--------------------------------------------------------------------------
+    | Hidden internal fields
+    |--------------------------------------------------------------------------
+    */
+
+    protected $hidden = [
+        'idempotency_key',
+        'request_hash',
+    ];
+
+    /*
+    |--------------------------------------------------------------------------
+    | Merchant relationship
+    |--------------------------------------------------------------------------
+    */
+
     public function merchant(): BelongsTo
     {
-        return $this->belongsTo(Merchant::class, 'merchant_id', 'id');
+        return $this->belongsTo(
+            Merchant::class,
+            'merchant_id'
+        );
     }
-    public function paymentAttempts(): HasMany
-{
-    return $this->hasMany(
-        PaymentAttempt::class,
-        'payment_intent_id',
-        'id'
-    );
-}
 }
