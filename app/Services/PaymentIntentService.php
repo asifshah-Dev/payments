@@ -2,105 +2,85 @@
 
 namespace App\Services;
 
+use App\Models\Merchant;
 use App\Models\PaymentIntent;
 use Illuminate\Support\Facades\DB;
-use RuntimeException;
-use InvalidArgumentException;
 
 class PaymentIntentService
 {
-    public function create(
-        string $merchantId,
-        int $amount,
-        string $currency,
-        ?string $description,
-        string $idempotencyKey
-    ): PaymentIntent {
-        $merchant = \App\Models\Merchant::find($merchantId);
+    /**
+     * Create or retrieve an idempotent payment intent.
+     */
+    public function createOrGet(Merchant $merchant, array $data, string $idempotencyKey): array
+    {
+        $idempotencyKey = trim($idempotencyKey);
 
-        if (!$merchant) {
-            throw new RuntimeException("Merchant [{$merchantId}] not found.");
-        }
-
-        if ($merchant->status !== 'active') {
-            throw new RuntimeException("Merchant [{$merchantId}] is not active.");
-        }
-
-        if ($amount <= 0) {
-            throw new InvalidArgumentException('Payment amount must be greater than zero.');
-        }
-
-        $currency = strtoupper($currency);
-
-        $allowedCurrencies = [
-            'USD',
-            'EUR',
-            'GBP',
-            'PKR',
+        $normalizedPayload = [
+            'amount' => $data['amount'],
+            'currency' => strtoupper($data['currency']),
+            'description' => $data['description'] ?? null,
         ];
 
-        if (!in_array($currency, $allowedCurrencies, true)) {
-            throw new InvalidArgumentException("Unsupported currency [{$currency}].");
-        }
+        $requestHash = hash('sha256', json_encode($normalizedPayload));
 
-        if (trim($idempotencyKey) === '') {
-            throw new InvalidArgumentException('Idempotency key must not be empty.');
-        }
-
-        if (strlen($idempotencyKey) > 255) {
-            throw new InvalidArgumentException('Idempotency key must not exceed 255 characters.');
-        }
-
-        $requestHash = $this->buildRequestHash(
-            $amount,
-            $currency,
-            $description
-        );
-
-        return DB::transaction(function () use (
-            $merchantId,
-            $amount,
-            $currency,
-            $description,
-            $idempotencyKey,
-            $requestHash
-        ) {
-            $existing = PaymentIntent::where('merchant_id', $merchantId)
+        return DB::transaction(function () use ($merchant, $idempotencyKey, $requestHash, $normalizedPayload) {
+            $existing = PaymentIntent::where('merchant_id', $merchant->id)
                 ->where('idempotency_key', $idempotencyKey)
                 ->lockForUpdate()
                 ->first();
 
             if ($existing) {
                 if ($existing->request_hash !== $requestHash) {
-                    throw new RuntimeException(
-                        'Idempotency key was already used with a different request.'
-                    );
+                    return [
+                        'status_code' => 409,
+                        'data' => [
+                            'message' => 'Idempotency key was already used with a different request.',
+                        ],
+                    ];
                 }
 
-                return $existing;
+                return [
+                    'status_code' => 201,
+                    'data' => [
+                        'id' => $existing->id,
+                        'amount' => $existing->amount,
+                        'currency' => $existing->currency,
+                        'status' => $existing->status,
+                        'description' => $existing->description,
+                    ],
+                ];
             }
 
-            return PaymentIntent::create([
-                'merchant_id' => $merchantId,
-                'amount' => $amount,
-                'currency' => $currency,
-                'description' => $description,
+            $paymentIntent = PaymentIntent::create([
+                'merchant_id' => $merchant->id,
+                'amount' => $normalizedPayload['amount'],
+                'currency' => $normalizedPayload['currency'],
+                'description' => $normalizedPayload['description'],
                 'status' => 'pending',
                 'idempotency_key' => $idempotencyKey,
                 'request_hash' => $requestHash,
             ]);
+
+            return [
+                'status_code' => 201,
+                'data' => [
+                    'id' => $paymentIntent->id,
+                    'amount' => $paymentIntent->amount,
+                    'currency' => $paymentIntent->currency,
+                    'status' => $paymentIntent->status,
+                    'description' => $paymentIntent->description,
+                ],
+            ];
         });
     }
 
-    private function buildRequestHash(
-        int $amount,
-        string $currency,
-        ?string $description
-    ): string {
-        return hash('sha256', json_encode([
-            'amount' => $amount,
-            'currency' => $currency,
-            'description' => $description,
-        ], JSON_THROW_ON_ERROR));
+    /**
+     * Find a payment intent for a merchant.
+     */
+    public function findForMerchant(Merchant $merchant, string $id): ?PaymentIntent
+    {
+        return PaymentIntent::where('id', $id)
+            ->where('merchant_id', $merchant->id)
+            ->first();
     }
 }

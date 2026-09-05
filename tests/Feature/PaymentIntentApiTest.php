@@ -21,6 +21,8 @@ function authenticatedMerchant(): array
 }
 
 test('creates a payment intent through the API', function () {
+    $this->withoutExceptionHandling();
+
     [$merchant, $apiKey] = authenticatedMerchant();
 
     $response = $this->withHeaders([
@@ -99,6 +101,7 @@ test('rejects request without authentication', function () {
 
     $response->assertStatus(401);
 });
+
 test('returns the existing payment intent for the same idempotency key', function () {
     [$merchant, $apiKey] = authenticatedMerchant();
 
@@ -135,6 +138,7 @@ test('returns the existing payment intent for the same idempotency key', functio
 
     expect(PaymentIntent::count())->toBe(1);
 });
+
 test('rejects the same idempotency key when the request is different', function () {
     [$merchant, $apiKey] = authenticatedMerchant();
 
@@ -169,6 +173,7 @@ test('rejects the same idempotency key when the request is different', function 
         'message' => 'Idempotency key was already used with a different request.',
     ]);
 });
+
 test('allows the same idempotency key for different merchants', function () {
     [$merchantA, $apiKeyA] = authenticatedMerchant();
     [$merchantB, $apiKeyB] = authenticatedMerchant();
