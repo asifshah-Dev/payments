@@ -6,6 +6,7 @@ use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Support\Str;
+use DomainException;
 
 class PaymentIntent extends Model
 {
@@ -58,6 +59,34 @@ class PaymentIntent extends Model
         'idempotency_key',
         'request_hash',
     ];
+
+    /*
+    |--------------------------------------------------------------------------
+    | State Machine Transitions
+    |--------------------------------------------------------------------------
+    */
+
+    protected array $allowedTransitions = [
+        'pending' => ['processing', 'failed', 'canceled'],
+        'processing' => ['succeeded', 'failed'],
+        'succeeded' => [],
+        'failed' => [],
+        'canceled' => [],
+    ];
+
+    public function transitionTo(string $newStatus): void
+    {
+        $currentStatus = $this->status;
+        $allowed = $this->allowedTransitions[$currentStatus] ?? [];
+
+        if (!in_array($newStatus, $allowed, true)) {
+            throw new DomainException(
+                "Invalid status transition from '{$currentStatus}' to '{$newStatus}'."
+            );
+        }
+
+        $this->update(['status' => $newStatus]);
+    }
 
     /*
     |--------------------------------------------------------------------------
