@@ -31,6 +31,7 @@ class PaymentAttemptService
             'paypal',
             'mock',
             'mock_fail',
+            'failing_gateway',
         ];
 
         if (!in_array($processor, $allowedProcessors, true)) {
