@@ -5,6 +5,7 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Support\Str;
 use DomainException;
 
@@ -70,7 +71,7 @@ class PaymentIntent extends Model
         'pending' => ['processing', 'failed', 'canceled'],
         'processing' => ['succeeded', 'failed'],
         'succeeded' => [],
-        'failed' => [],
+        'failed' => ['processing'], // Allow retries from a failed state
         'canceled' => [],
     ];
 
@@ -99,6 +100,14 @@ class PaymentIntent extends Model
         return $this->belongsTo(
             Merchant::class,
             'merchant_id'
+        );
+    }
+    public function paymentAttempts(): HasMany
+    {
+        return $this->hasMany(
+            PaymentAttempt::class,
+            'payment_intent_id',
+            'id'
         );
     }
 }

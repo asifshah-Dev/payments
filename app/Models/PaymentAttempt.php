@@ -7,6 +7,7 @@ use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use DomainException;
 
 class PaymentAttempt extends Model
 {
@@ -31,6 +32,27 @@ class PaymentAttempt extends Model
     protected $casts = [
         'amount' => 'integer',
     ];
+
+    protected array $allowedTransitions = [
+        'pending' => ['processing', 'failed'],
+        'processing' => ['succeeded', 'failed'],
+        'succeeded' => [],
+        'failed' => [],
+    ];
+
+    public function transitionTo(string $newStatus, array $additionalData = []): void
+    {
+        $currentStatus = $this->status;
+        $allowed = $this->allowedTransitions[$currentStatus] ?? [];
+
+        if (!in_array($newStatus, $allowed, true)) {
+            throw new DomainException(
+                "Invalid payment attempt status transition from '{$currentStatus}' to '{$newStatus}'."
+            );
+        }
+
+        $this->update(array_merge(['status' => $newStatus], $additionalData));
+    }
 
     public function paymentIntent(): BelongsTo
     {
