@@ -5,64 +5,38 @@ namespace App\Http\Middleware;
 use App\Models\Merchant;
 use Closure;
 use Illuminate\Http\Request;
-use Illuminate\Support\Str;
 use Symfony\Component\HttpFoundation\Response;
 
 class MerchantAuthentication
 {
-    /**
-     * Handle an incoming request.
-     *
-     * @param  Closure(Request): (Response)  $next
-     */
     public function handle(Request $request, Closure $next): Response
     {
-        $authorization = $request->header('Authorization');
+        $header = $request->header('Authorization');
 
-        if (!$authorization || !str_starts_with($authorization, 'Bearer ')) {
-            return response()->json([
-                'message' => 'Unauthenticated.',
-            ], 401);
+        if (!$header || !str_starts_with($header, 'Bearer ')) {
+            return response()->json(['message' => 'Unauthorized. Missing or invalid Authorization header.'], Response::HTTP_UNAUTHORIZED);
         }
 
-        $token = trim(substr($authorization, 7));
+        $token = substr($header, 7);
+        $merchant = null;
 
-        if ($token === '') {
-            return response()->json([
-                'message' => 'Unauthenticated.',
-            ], 401);
-        }
-
-        // Support both test-token-{merchant_id} contract tests and production API key hashes
-        if (str_starts_with($token, 'test-token-')) {
-            $merchantId = substr($token, strlen('test-token-'));
-
-            if (!Str::isUuid($merchantId)) {
-                return response()->json([
-                    'message' => 'Unauthenticated.',
-                ], 401);
-            }
-
-            $merchant = Merchant::where('id', $merchantId)->first();
+        // Security Boundary: Test tokens are strictly restricted to the testing environment
+        if (app()->environment('testing') && str_starts_with($token, 'test-token-')) {
+            $merchantId = str_replace('test-token-', '', $token);
+            $merchant = Merchant::find($merchantId);
         } else {
-            $apiKeyHash = hash('sha256', $token);
-            $merchant = Merchant::where('api_key_hash', $apiKeyHash)->first();
+            // Production path: Hash the token using SHA-256 and look up by api_key_hash
+            $tokenHash = hash('sha256', $token);
+            $merchant = Merchant::where('api_key_hash', $tokenHash)->first();
         }
 
-        if (!$merchant) {
-            return response()->json([
-                'message' => 'Unauthenticated.',
-            ], 401);
+        if (!$merchant || $merchant->status !== 'active') {
+            return response()->json(['message' => 'Unauthorized. Invalid or inactive merchant.'], Response::HTTP_UNAUTHORIZED);
         }
 
-        if ($merchant->status !== 'active') {
-            return response()->json([
-                'message' => 'Merchant account is inactive.',
-            ], 403);
-        }
-
-        // Attach merchant to request attributes
+        // Attach authenticated merchant to request attributes and user resolver
         $request->attributes->set('merchant', $merchant);
+        $request->setUserResolver(fn () => $merchant);
 
         return $next($request);
     }
