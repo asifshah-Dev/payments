@@ -114,4 +114,17 @@ class PaymentIntent extends Model
 {
     return $this->hasMany(PaymentAttempt::class);
 }
+public function refunds(): HasMany
+{
+    return $this->hasMany(Refund::class);
+}
+
+public function refundableAmount(): int
+{
+    $refundedSum = $this->refunds()
+        ->where('status', 'succeeded')
+        ->sum('amount');
+
+    return $this->amount - $refundedSum;
+}
 }
