@@ -4,10 +4,18 @@ namespace App\Services;
 
 use App\Models\Merchant;
 use App\Models\PaymentIntent;
+use App\Contracts\PaymentProcessorInterface;
 use Illuminate\Support\Facades\DB;
+use Throwable;
 
 class PaymentIntentService
 {
+    public function __construct(
+        protected PaymentOrchestrationService $orchestrationService,
+        protected PaymentProcessorInterface $defaultProcessor,
+        protected ?PaymentProcessorInterface $fallbackProcessor = null
+    ) {}
+
     /**
      * Create or retrieve an idempotent payment intent.
      */
@@ -23,7 +31,7 @@ class PaymentIntentService
 
         $requestHash = hash('sha256', json_encode($normalizedPayload));
 
-        return DB::transaction(function () use ($merchant, $idempotencyKey, $requestHash, $normalizedPayload) {
+        $result = DB::transaction(function () use ($merchant, $idempotencyKey, $requestHash, $normalizedPayload) {
             $existing = PaymentIntent::where('merchant_id', $merchant->id)
                 ->where('idempotency_key', $idempotencyKey)
                 ->lockForUpdate()
@@ -70,8 +78,37 @@ class PaymentIntentService
                     'status' => $paymentIntent->status,
                     'description' => $paymentIntent->description,
                 ],
+                'intent_model' => $paymentIntent,
             ];
         });
+
+        // If it's a conflict error (409) or an existing cached intent, return immediately
+        if (isset($result['status_code']) && $result['status_code'] === 409) {
+            return $result;
+        }
+
+        // If a new intent was created, run it through the orchestration pipeline outside the main DB lock transaction
+        if (isset($result['intent_model'])) {
+            $intent = $result['intent_model'];
+            unset($result['intent_model']);
+
+            try {
+                $this->orchestrationService->process(
+                    $intent,
+                    $this->defaultProcessor,
+                    $this->fallbackProcessor
+                );
+
+                // Update final status in response payload
+                $result['data']['status'] = $intent->fresh()->status;
+            } catch (Throwable $e) {
+                $result['status_code'] = 400;
+                $result['data']['status'] = $intent->fresh()->status;
+                $result['data']['error'] = $e->getMessage();
+            }
+        }
+
+        return $result;
     }
 
     /**

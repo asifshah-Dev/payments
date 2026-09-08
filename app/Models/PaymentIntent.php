@@ -110,4 +110,8 @@ class PaymentIntent extends Model
             'id'
         );
     }
+    public function attempts()
+{
+    return $this->hasMany(PaymentAttempt::class);
+}
 }
