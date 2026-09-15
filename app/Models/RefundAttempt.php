@@ -13,6 +13,10 @@ class RefundAttempt extends Model
 
     protected $guarded = [];
 
+    protected $casts = [
+        'raw_response' => 'array',
+    ];
+
     public function refund(): BelongsTo
     {
         return $this->belongsTo(Refund::class);
