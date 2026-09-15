@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Models\PaymentIntent;
 use App\Models\PaymentAttempt;
+use App\Contracts\PaymentProcessorInterface;
 use Illuminate\Support\Facades\DB;
 use Throwable;
 use Exception;
@@ -12,7 +13,7 @@ class PaymentOrchestrationService
 {
     protected const MAX_ATTEMPTS = 3;
 
-    public function process(PaymentIntent $intent, object $primaryProcessor, ?object $fallbackProcessor = null): array
+    public function process(PaymentIntent $intent, PaymentProcessorInterface $primaryProcessor, ?PaymentProcessorInterface $fallbackProcessor = null): array
     {
         // 1. Terminal-state protection
         if (in_array($intent->status, ['succeeded', 'canceled'], true)) {
