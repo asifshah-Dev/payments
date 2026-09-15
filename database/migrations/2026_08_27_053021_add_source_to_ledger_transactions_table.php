@@ -16,6 +16,7 @@ return new class extends Migration
     $table->string('source_id')->nullable();
 
     $table->index(['source_type', 'source_id']);
+    $table->unique(['source_type', 'source_id', 'type'], 'ledger_transactions_source_type_id_type_unique');
 });
     }
 

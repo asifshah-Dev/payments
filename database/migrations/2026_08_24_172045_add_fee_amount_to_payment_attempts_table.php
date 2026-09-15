@@ -9,7 +9,7 @@ class AddFeeAmountToPaymentAttemptsTable extends Migration
     public function up(): void
     {
         Schema::table('payment_attempts', function (Blueprint $table) {
-            $table->unsignedInteger('fee_amount')->default(0)->after('amount');
+            $table->integer('fee_amount')->default(0)->after('amount');
         });
     }
 

@@ -5,6 +5,8 @@ namespace App\Services;
 use App\Models\LedgerAccount;
 use App\Models\LedgerEntry;
 use App\Models\LedgerTransaction;
+use App\Models\Refund;
+use App\Models\PaymentAttempt;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\DB;
 use InvalidArgumentException;
@@ -12,6 +14,179 @@ use RuntimeException;
 
 class LedgerPostingService
 {
+    public function postFromPaymentAttempt(PaymentAttempt $paymentAttempt): LedgerTransaction
+    {
+        if ($paymentAttempt->status !== 'succeeded') {
+            throw new RuntimeException('Only succeeded payment attempts can be posted to the ledger.');
+        }
+
+        $feeAmount = (int) ($paymentAttempt->fee_amount ?? 0);
+        if ($feeAmount < 0 || $feeAmount > $paymentAttempt->amount) {
+            throw new InvalidArgumentException('Payment fee must be between zero and the payment amount.');
+        }
+
+        $existing = LedgerTransaction::query()
+            ->where('payment_attempt_id', $paymentAttempt->id)
+            ->where('type', 'payment')
+            ->first();
+
+        if ($existing) {
+            throw new RuntimeException('This payment attempt has already been posted to the ledger.');
+        }
+
+        $merchantPayable = LedgerAccount::query()
+            ->where('merchant_id', $paymentAttempt->paymentIntent->merchant_id)
+            ->where('type', 'liability')
+            ->where('currency', $paymentAttempt->currency)
+            ->where('status', 'active')
+            ->firstOrFail();
+        $clearing = LedgerAccount::query()
+            ->whereNull('merchant_id')
+            ->where('type', 'asset')
+            ->where('currency', $paymentAttempt->currency)
+            ->where('status', 'active')
+            ->firstOrFail();
+
+        $entries = [[
+            'ledger_account_id' => $clearing->id,
+            'type' => 'debit',
+            'amount' => $paymentAttempt->amount,
+            'currency' => $paymentAttempt->currency,
+        ], [
+            'ledger_account_id' => $merchantPayable->id,
+            'type' => 'credit',
+            'amount' => $paymentAttempt->amount - $feeAmount,
+            'currency' => $paymentAttempt->currency,
+        ]];
+
+        if ($feeAmount > 0) {
+            $feeRevenue = LedgerAccount::query()
+                ->whereNull('merchant_id')
+                ->where('type', 'revenue')
+                ->where('currency', $paymentAttempt->currency)
+                ->where('status', 'active')
+                ->firstOrFail();
+
+            $entries[] = [
+                'ledger_account_id' => $feeRevenue->id,
+                'type' => 'credit',
+                'amount' => $feeAmount,
+                'currency' => $paymentAttempt->currency,
+            ];
+        }
+
+        $transaction = $this->post(
+            type: 'payment',
+            amount: $paymentAttempt->amount,
+            currency: $paymentAttempt->currency,
+            direction: 'credit',
+            entries: $entries,
+            source: $paymentAttempt,
+            description: 'Payment received',
+        );
+
+        $transaction->update(['payment_attempt_id' => $paymentAttempt->id]);
+
+        return $transaction->fresh('entries');
+    }
+
+    public function postRefund(Refund $refund): LedgerTransaction
+    {
+        return DB::transaction(function () use ($refund) {
+            $refund = Refund::query()
+                ->with('paymentIntent')
+                ->lockForUpdate()
+                ->findOrFail($refund->id);
+
+            if ($refund->status !== 'succeeded') {
+                throw new RuntimeException('Only succeeded refunds can be posted to the ledger.');
+            }
+
+            $existing = LedgerTransaction::query()
+                ->where('source_type', Refund::class)
+                ->where('source_id', $refund->id)
+                ->where('type', 'refund')
+                ->first();
+
+            if ($existing) {
+                return $existing->load('entries');
+            }
+
+            $paymentAmount = (int) $refund->paymentIntent->amount;
+            $refundedAmount = (int) $refund->paymentIntent->refunds()
+                ->where('status', 'succeeded')
+                ->whereKeyNot($refund->id)
+                ->sum('amount');
+
+            if ($refund->amount <= 0 || $refundedAmount + $refund->amount > $paymentAmount) {
+                throw new InvalidArgumentException('Refund amount exceeds the refundable payment amount.');
+            }
+
+            $paymentAttempt = $refund->paymentIntent->attempts()
+                ->where('status', 'succeeded')
+                ->latest()
+                ->first();
+            $feeAmount = (int) ($paymentAttempt?->fee_amount ?? 0);
+            $feeRefund = intdiv($refund->amount * $feeAmount, $paymentAmount);
+            $payableRefund = $refund->amount - $feeRefund;
+
+            $clearing = LedgerAccount::query()
+                ->whereNull('merchant_id')
+                ->where('type', 'asset')
+                ->where('currency', $refund->currency)
+                ->where('status', 'active')
+                ->firstOrFail();
+            $merchantPayable = LedgerAccount::query()
+                ->where('merchant_id', $refund->merchant_id)
+                ->where('type', 'liability')
+                ->where('currency', $refund->currency)
+                ->where('status', 'active')
+                ->firstOrFail();
+
+            $entries = [
+                [
+                    'ledger_account_id' => $merchantPayable->id,
+                    'type' => 'debit',
+                    'amount' => $payableRefund,
+                    'currency' => $refund->currency,
+                ],
+            ];
+
+            if ($feeRefund > 0) {
+                $feeRevenue = LedgerAccount::query()
+                    ->whereNull('merchant_id')
+                    ->where('type', 'revenue')
+                    ->where('currency', $refund->currency)
+                    ->where('status', 'active')
+                    ->firstOrFail();
+
+                $entries[] = [
+                    'ledger_account_id' => $feeRevenue->id,
+                    'type' => 'debit',
+                    'amount' => $feeRefund,
+                    'currency' => $refund->currency,
+                ];
+            }
+
+            $entries[] = [
+                'ledger_account_id' => $clearing->id,
+                'type' => 'credit',
+                'amount' => $refund->amount,
+                'currency' => $refund->currency,
+            ];
+
+            return $this->post(
+                type: 'refund',
+                amount: $refund->amount,
+                currency: $refund->currency,
+                direction: 'debit',
+                entries: $entries,
+                source: $refund,
+                description: 'Refund posted',
+            );
+        });
+    }
+
     /**
      * Post a new double-entry ledger transaction.
      *
