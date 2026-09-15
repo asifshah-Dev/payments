@@ -4,6 +4,8 @@ namespace App\Services\Payments;
 
 use App\Models\PaymentAttempt;
 use App\Models\PaymentWebhookEvent;
+use App\Models\RefundAttempt;
+use App\Models\Refund;
 use App\Services\PaymentAttemptService;
 use Illuminate\Support\Facades\DB;
 use InvalidArgumentException;
@@ -69,10 +71,61 @@ class WebhookProcessorService
                 }
 
                 // 4. Validate supported event types early
-                if (!in_array($eventType, ['payment_intent.succeeded', 'payment_intent.failed'], true)) {
+                if (!in_array($eventType, [
+                    'payment_intent.succeeded',
+                    'payment_intent.failed',
+                    'refund.succeeded',
+                    'refund.failed',
+                ], true)) {
                     $webhookEvent->update([
                         'status' => 'ignored',
                         'error_message' => "Unhandled event type [{$eventType}].",
+                    ]);
+                    return;
+                }
+
+                if (str_starts_with($eventType, 'refund.')) {
+                    $refundAttempt = RefundAttempt::where('processor', $processor)
+                        ->where('processor_reference_id', $processorReferenceId)
+                        ->first();
+
+                    if (!$refundAttempt) {
+                        $webhookEvent->update([
+                            'status' => 'failed',
+                            'error_message' => 'Associated refund attempt not found.',
+                        ]);
+                        return;
+                    }
+
+                    $refund = $refundAttempt->refund;
+                    if ($eventType === 'refund.succeeded') {
+                        if ($refundAttempt->status === 'failed' || $refund->status === 'failed') {
+                            $webhookEvent->update([
+                                'status' => 'ignored',
+                                'error_message' => 'Out-of-order event: Refund is already failed.',
+                            ]);
+                            return;
+                        }
+
+                        $refundAttempt->update(['status' => 'succeeded']);
+                        $refund->update(['status' => 'succeeded']);
+                    } elseif ($refundAttempt->status !== 'succeeded' && $refund->status !== 'succeeded') {
+                        $refundAttempt->update([
+                            'status' => 'failed',
+                            'error_message' => $payload['data']['object']['failure_message'] ?? 'Gateway reported refund failure.',
+                        ]);
+                        $refund->update(['status' => 'failed']);
+                    } else {
+                        $webhookEvent->update([
+                            'status' => 'ignored',
+                            'error_message' => 'Out-of-order event: Refund is already succeeded.',
+                        ]);
+                        return;
+                    }
+
+                    $webhookEvent->update([
+                        'status' => 'processed',
+                        'error_message' => null,
                     ]);
                     return;
                 }
