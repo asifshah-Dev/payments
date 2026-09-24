@@ -8,6 +8,7 @@ use App\Models\PaymentWebhookEvent;
 use App\Models\Refund;
 use App\Models\RefundAttempt;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Testing\TestResponse;
 use Tests\TestCase;
 
 class RefundWebhookApiContractTest extends TestCase
@@ -66,12 +67,33 @@ class RefundWebhookApiContractTest extends TestCase
         ], $extra);
     }
 
-    private function postWebhook(string $processor, array $payload, ?string $signature = 'valid_secret_signature')
+    /**
+     * A fresh Stripe-style signature header. When the test wants to
+     * simulate a missing header, pass `signature: ''`. When it wants a
+     * specific (bad or old) one, pass it explicitly.
+     */
+    private function freshSignature(): string
     {
+        return 't=' . now()->timestamp . ',v1=valid_secret_signature';
+    }
+
+    private function postWebhook(
+        string $processor,
+        array $payload,
+        ?string $signature = null,
+    ): TestResponse {
+        // null means "build a fresh valid one".
+        if ($signature === null) {
+            $signature = $this->freshSignature();
+        }
+
         $headers = ['Accept' => 'application/json'];
-        if ($signature !== null) {
+
+        // '' means "send no header at all".
+        if ($signature !== '') {
             $headers['Stripe-Signature'] = $signature;
         }
+
         return $this->postJson("/api/v1/webhooks/{$processor}", $payload, $headers);
     }
 
@@ -117,9 +139,9 @@ class RefundWebhookApiContractTest extends TestCase
             'evt_api_bad_sig',
             'refund.succeeded',
             $attempt->processor_reference_id,
-        ), signature: 'not-a-valid-signature')->assertStatus(401);
+        ), signature: 't=' . now()->timestamp . ',v1=not-a-valid-signature')
+          ->assertStatus(401);
 
-        // The attempt must be untouched.
         $this->assertSame('pending', $attempt->fresh()->status);
     }
 
@@ -131,7 +153,7 @@ class RefundWebhookApiContractTest extends TestCase
             'evt_api_no_sig',
             'refund.succeeded',
             $attempt->processor_reference_id,
-        ), signature: null)->assertStatus(401);
+        ), signature: '')->assertStatus(401);
     }
 
     // ---------------------------------------------------------------------
@@ -222,18 +244,13 @@ class RefundWebhookApiContractTest extends TestCase
             $attempt->processor_reference_id,
         ))->assertStatus(200);
 
-        // The paypal attempt must be untouched.
         $this->assertSame('pending', $attempt->fresh()->status);
     }
 
     public function test_processor_in_payload_cannot_trick_the_service(): void
     {
-        // A stripe attempt exists in the DB.
         $attempt = $this->createRefundAttempt('stripe');
 
-        // A malicious client posts to the paypal route but claims the
-        // processor is stripe in the body, hoping the service will look
-        // up the stripe attempt anyway.
         $payload = $this->webhookPayload(
             'evt_api_spoof',
             'refund.succeeded',
@@ -243,7 +260,6 @@ class RefundWebhookApiContractTest extends TestCase
 
         $this->postWebhook('paypal', $payload)->assertStatus(200);
 
-        // The route's processor wins. The stripe attempt must be untouched.
         $this->assertSame('pending', $attempt->fresh()->status);
     }
 
@@ -287,7 +303,6 @@ class RefundWebhookApiContractTest extends TestCase
 
     public function test_malformed_json_returns_400(): void
     {
-        // Bypass postJson and send raw garbage with a JSON content-type.
         $response = $this->call(
             'POST',
             '/api/v1/webhooks/stripe',
@@ -295,14 +310,12 @@ class RefundWebhookApiContractTest extends TestCase
             [],
             [],
             [
-                'CONTENT_TYPE' => 'application/json',
-                'HTTP_STRIPE_SIGNATURE' => 'valid_secret_signature',
+                'CONTENT_TYPE'          => 'application/json',
+                'HTTP_STRIPE_SIGNATURE' => $this->freshSignature(),
             ],
             '{not valid json',
         );
 
-        // 400 is what a real HTTP stack returns for malformed JSON.
-        // The test allows 400 or 422 — both are honest rejections.
         $this->assertContains($response->status(), [400, 422]);
     }
 
@@ -331,20 +344,12 @@ class RefundWebhookApiContractTest extends TestCase
     {
         $attempt = $this->createRefundAttempt('stripe');
 
-        // Two JSON documents that parse to the *same* PHP array but have
-        // different byte representations. If the server verifies the
-        // signature against `json_encode($request->all())` instead of the
-        // raw body, both will hash identically and the second one will be
-        // accepted. If it verifies against the raw body, only one can be
-        // the "correct" one and the difference will matter.
         $canonical = json_encode($this->webhookPayload(
             'evt_raw_body_test',
             'refund.succeeded',
             $attempt->processor_reference_id,
         ));
 
-        // A body with the keys in a different order and extra whitespace,
-        // but which decodes to the same array.
         $reordered = '  ' . json_encode(array_reverse(
             $this->webhookPayload(
                 'evt_raw_body_test',
@@ -354,21 +359,14 @@ class RefundWebhookApiContractTest extends TestCase
             true,
         )) . '  ';
 
-        // Sanity: they must decode to equivalent arrays, otherwise this
-        // test is testing nothing. assertEquals ignores key order;
-        // assertSame does not.
         $this->assertEquals(
             json_decode($canonical, true),
             json_decode($reordered, true),
             'Test setup: the two bodies must decode to equivalent arrays.',
         );
 
-        // Sanity: they must be different bytes.
         $this->assertNotSame($canonical, $reordered);
 
-        // Send the reordered body. In the stub world (any string works),
-        // this passes. In a real implementation, the server must compute
-        // the HMAC against the raw bytes it received.
         $response = $this->call(
             'POST',
             '/api/v1/webhooks/stripe',
@@ -376,38 +374,64 @@ class RefundWebhookApiContractTest extends TestCase
             [],
             [],
             [
-                'CONTENT_TYPE' => 'application/json',
-                'HTTP_STRIPE_SIGNATURE' => 'valid_secret_signature',
+                'CONTENT_TYPE'          => 'application/json',
+                'HTTP_STRIPE_SIGNATURE' => $this->freshSignature(),
             ],
             $reordered,
         );
 
         $response->assertStatus(200);
 
-        // The attempt was updated, proving the raw body flowed through.
         $this->assertSame('succeeded', $attempt->fresh()->status);
     }
 
     // ---------------------------------------------------------------------
-    // 15. Replay window (currently a passthrough; strict assertion to come)
+    // 15. Replay window
     // ---------------------------------------------------------------------
 
-    public function test_webhook_older_than_the_replay_window_is_currently_accepted(): void
+    public function test_webhook_older_than_the_replay_window_is_rejected(): void
     {
         $attempt = $this->createRefundAttempt('stripe');
+
+        $oldTimestamp = now()->subHour()->timestamp;
 
         $payload = $this->webhookPayload(
             'evt_replay_old',
             'refund.succeeded',
             $attempt->processor_reference_id,
-            ['created' => now()->subHour()->timestamp],
         );
 
-        // Today the service does not enforce a replay window, so an old
-        // event is processed normally. When replay protection is added,
-        // this test must change to assert rejection (401 or 422) and
-        // verify the attempt stays 'pending'.
-        $this->postWebhook('stripe', $payload)->assertStatus(200);
+        $this->postWebhook(
+            'stripe',
+            $payload,
+            signature: "t={$oldTimestamp},v1=valid_secret_signature",
+        )->assertStatus(401);
+
+        $this->assertSame('pending', $attempt->fresh()->status);
+
+        $this->assertDatabaseMissing('payment_webhook_events', [
+            'event_id' => 'evt_replay_old',
+        ]);
+    }
+
+    public function test_webhook_within_the_replay_window_is_accepted(): void
+    {
+        $attempt = $this->createRefundAttempt('stripe');
+
+        $freshTimestamp = now()->subSeconds(10)->timestamp;
+
+        $payload = $this->webhookPayload(
+            'evt_replay_fresh',
+            'refund.succeeded',
+            $attempt->processor_reference_id,
+        );
+
+        $this->postWebhook(
+            'stripe',
+            $payload,
+            signature: "t={$freshTimestamp},v1=valid_secret_signature",
+        )->assertStatus(200);
+
         $this->assertSame('succeeded', $attempt->fresh()->status);
     }
 
