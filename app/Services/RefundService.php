@@ -8,6 +8,7 @@ use App\Models\Merchant;
 use App\Models\PaymentIntent;
 use App\Models\Refund;
 use Illuminate\Database\UniqueConstraintViolationException;
+use Illuminate\Support\Facades\DB;
 
 class RefundService
 {
@@ -25,7 +26,7 @@ class RefundService
     ): array {
         $requestHash = $this->requestHash($payment->id, $amount, $reason);
 
-        // --- 1. Idempotent replay? ---
+        // --- 1. Idempotent replay? (fast path, outside the transaction) ---
         $existing = Refund::query()
             ->where('merchant_id', $merchant->id)
             ->where('idempotency_key', $idempotencyKey)
@@ -42,52 +43,75 @@ class RefundService
             ];
         }
 
-        // --- 2. Ceiling check ---
-        $alreadyRefunded = (int) Refund::query()
-            ->where('payment_intent_id', $payment->id)
-            ->whereIn('status', ['pending', 'succeeded'])
-            ->sum('amount');
-
-        if ($alreadyRefunded + $amount > $payment->amount) {
-            throw new RefundNotAllowedException(
-                'Refund amount exceeds remaining refundable amount.'
-            );
-        }
-
-        // --- 3. Insert. The unique index on (merchant_id, idempotency_key)
-        //        is the real guard against concurrent duplicates. ---
-        try {
-            $refund = Refund::create([
-                'payment_intent_id' => $payment->id,
-                'merchant_id'       => $merchant->id,
-                'amount'            => $amount,
-                'currency'          => $payment->currency, // always from the PI
-                'status'            => 'pending',
-                'reason'            => $reason,
-                'idempotency_key'   => $idempotencyKey,
-                'request_hash'      => $requestHash,
-            ]);
-        } catch (UniqueConstraintViolationException $e) {
-            // A concurrent request won the race. Re-read and treat as replay.
-            $existing = Refund::query()
-                ->where('merchant_id', $merchant->id)
-                ->where('idempotency_key', $idempotencyKey)
+        // --- 2. Ceiling check + insert, atomically ---
+        //
+        // The lockForUpdate() below serializes concurrent refunds against
+        // the same payment intent. The ceiling SUM is re-run *after* the
+        // lock is acquired, so any refund committed by a concurrent
+        // request is now visible. Without the lock, two simultaneous
+        // requests would each see "0 already refunded" and both insert,
+        // resulting in an over-refund (see RefundCeilingConcurrencyTest).
+        return DB::transaction(function () use (
+            $merchant,
+            $payment,
+            $amount,
+            $reason,
+            $idempotencyKey,
+            $requestHash
+        ) {
+            $lockedPayment = PaymentIntent::query()
+                ->where('id', $payment->id)
+                ->lockForUpdate()
                 ->firstOrFail();
 
-            if (! hash_equals($existing->request_hash, $requestHash)) {
-                throw new IdempotencyConflictException();
+            $alreadyRefunded = (int) Refund::query()
+                ->where('payment_intent_id', $lockedPayment->id)
+                ->whereIn('status', ['pending', 'succeeded'])
+                ->sum('amount');
+
+            if ($alreadyRefunded + $amount > $lockedPayment->amount) {
+                throw new RefundNotAllowedException(
+                    'Refund amount exceeds remaining refundable amount.'
+                );
+            }
+
+            // --- 3. Insert. The unique index on (merchant_id, idempotency_key)
+            //        guards against two concurrent requests that carry the
+            //        same key. ---
+            try {
+                $refund = Refund::create([
+                    'payment_intent_id' => $lockedPayment->id,
+                    'merchant_id'       => $merchant->id,
+                    'amount'            => $amount,
+                    'currency'          => $lockedPayment->currency, // always from the PI
+                    'status'            => 'pending',
+                    'reason'            => $reason,
+                    'idempotency_key'   => $idempotencyKey,
+                    'request_hash'      => $requestHash,
+                ]);
+            } catch (UniqueConstraintViolationException $e) {
+                // A concurrent request won the race with the same key.
+                // Re-read and treat as a replay.
+                $existing = Refund::query()
+                    ->where('merchant_id', $merchant->id)
+                    ->where('idempotency_key', $idempotencyKey)
+                    ->firstOrFail();
+
+                if (! hash_equals($existing->request_hash, $requestHash)) {
+                    throw new IdempotencyConflictException();
+                }
+
+                return [
+                    'data'        => $this->serialize($existing),
+                    'status_code' => 200,
+                ];
             }
 
             return [
-                'data'        => $this->serialize($existing),
-                'status_code' => 200,
+                'data'        => $this->serialize($refund),
+                'status_code' => 201,
             ];
-        }
-
-        return [
-            'data'        => $this->serialize($refund),
-            'status_code' => 201,
-        ];
+        });
     }
 
     private function requestHash(string $paymentIntentId, int $amount, ?string $reason): string
