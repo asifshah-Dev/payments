@@ -42,12 +42,13 @@ class WebhookController extends Controller
         try {
             // 3. Delegate execution directly to the core WebhookProcessorService
             $this->webhookProcessor->handle(
-                processor: $processor,
-                eventId: $eventId,
-                eventType: $eventType,
-                payload: $payload,
-                signature: $signature
-            );
+    processor: $processor,
+    eventId: $eventId,
+    eventType: $eventType,
+    payload: $payload,
+    signature: $signature,
+    rawBody: $request->getContent(),
+);
 
             return response()->json(['status' => 'success'], Response::HTTP_OK);
 

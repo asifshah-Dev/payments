@@ -22,10 +22,12 @@ class WebhookProcessorService
         string $eventId,
         string $eventType,
         array $payload,
-        string $signature
+        string $signature,
+        string $rawBody        // <-- new
+
     ): void {
         // 1. Verify signature (Extensible stub for now)
-        if (!$this->verifySignature($processor, $payload, $signature)) {
+        if (!$this->verifySignature($processor, $payload, $signature, $rawBody)) {
             throw new InvalidArgumentException('Invalid webhook signature.');
         }
 
@@ -190,8 +192,14 @@ class WebhookProcessorService
         }
     }
 
-    protected function verifySignature(string $processor, array $payload, string $signature): bool
-    {
-        return $signature === 'valid_secret_signature';
-    }
+   protected function verifySignature(
+    string $processor,
+    array $payload,
+    string $signature,
+    string $rawBody,
+): bool {
+    // Stub. Future implementation must verify against $rawBody, NOT
+    // against json_encode($payload) — see the test below for why.
+    return $signature === 'valid_secret_signature';
+}
 }
