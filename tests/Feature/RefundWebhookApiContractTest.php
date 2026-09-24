@@ -68,34 +68,54 @@ class RefundWebhookApiContractTest extends TestCase
     }
 
     /**
-     * A fresh Stripe-style signature header. When the test wants to
-     * simulate a missing header, pass `signature: ''`. When it wants a
-     * specific (bad or old) one, pass it explicitly.
+     * Build a real Stripe-style HMAC signature for a body.
+     *
+     * Uses the same secret source as WebhookProcessorService::verifySignature:
+     * config("webhooks.secrets.{processor}"). No fallback, so if the config
+     * is missing, the test fails loudly instead of silently producing a
+     * signature the service cannot verify.
      */
-    private function freshSignature(): string
+    private function signBody(string $processor, string $body, ?int $timestamp = null): string
     {
-        return 't=' . now()->timestamp . ',v1=valid_secret_signature';
+        $secret    = config("webhooks.secrets.{$processor}");
+        $timestamp = $timestamp ?? now()->timestamp;
+        $signature = hash_hmac('sha256', "{$timestamp}.{$body}", $secret);
+
+        return "t={$timestamp},v1={$signature}";
     }
 
-    private function postWebhook(
-        string $processor,
-        array $payload,
-        ?string $signature = null,
-    ): TestResponse {
-        // null means "build a fresh valid one".
-        if ($signature === null) {
-            $signature = $this->freshSignature();
-        }
+    /**
+     * Send a webhook. If $signature is null, build a valid HMAC for the body.
+     * Pass '' to send no signature header at all.
+     */
+   /**
+ * Send a webhook. If $signature is null, build a valid HMAC for the body.
+ * Pass '' to send no signature header at all.
+ */
+private function postWebhook(
+    string $processor,
+    array $payload,
+    ?string $signature = null,
+): TestResponse {
+    $body = json_encode($payload);
 
-        $headers = ['Accept' => 'application/json'];
-
-        // '' means "send no header at all".
-        if ($signature !== '') {
-            $headers['Stripe-Signature'] = $signature;
-        }
-
-        return $this->postJson("/api/v1/webhooks/{$processor}", $payload, $headers);
+    if ($signature === null) {
+        $signature = $this->signBody($processor, $body);
     }
+
+    $headers = ['Accept' => 'application/json'];
+
+    // Use Symfony-style server key. Laravel's TestCase::call() expects
+    // headers as HTTP_* keys, not raw header names.
+    if ($signature !== '') {
+        $headers['HTTP_STRIPE_SIGNATURE'] = $signature;
+    }
+
+    return $this->call('POST', "/api/v1/webhooks/{$processor}", [], [], [], array_merge(
+        $headers,
+        ['CONTENT_TYPE' => 'application/json'],
+    ), $body);
+}
 
     // ---------------------------------------------------------------------
     // 1–2. Happy paths
@@ -135,11 +155,12 @@ class RefundWebhookApiContractTest extends TestCase
     {
         $attempt = $this->createRefundAttempt();
 
+        // A well-formed header with a hex signature that will not match.
         $this->postWebhook('stripe', $this->webhookPayload(
             'evt_api_bad_sig',
             'refund.succeeded',
             $attempt->processor_reference_id,
-        ), signature: 't=' . now()->timestamp . ',v1=not-a-valid-signature')
+        ), signature: 't=' . now()->timestamp . ',v1=' . str_repeat('0', 64))
           ->assertStatus(401);
 
         $this->assertSame('pending', $attempt->fresh()->status);
@@ -154,6 +175,116 @@ class RefundWebhookApiContractTest extends TestCase
             'refund.succeeded',
             $attempt->processor_reference_id,
         ), signature: '')->assertStatus(401);
+    }
+
+    // ---------------------------------------------------------------------
+    // 3b. HMAC-specific tests
+    // ---------------------------------------------------------------------
+
+    public function test_valid_hmac_signature_is_accepted(): void
+    {
+        $attempt = $this->createRefundAttempt('stripe');
+
+        $payload = $this->webhookPayload(
+            'evt_hmac_valid',
+            'refund.succeeded',
+            $attempt->processor_reference_id,
+        );
+
+        $this->postWebhook('stripe', $payload)->assertStatus(200);
+
+        $this->assertSame('succeeded', $attempt->fresh()->status);
+    }
+
+    public function test_wrong_hmac_secret_is_rejected(): void
+    {
+        $attempt = $this->createRefundAttempt('stripe');
+
+        $payload = $this->webhookPayload(
+            'evt_hmac_wrong_secret',
+            'refund.succeeded',
+            $attempt->processor_reference_id,
+        );
+        $body      = json_encode($payload);
+        $timestamp = now()->timestamp;
+
+        $signature = hash_hmac('sha256', "{$timestamp}.{$body}", 'wrong_secret');
+        $header    = "t={$timestamp},v1={$signature}";
+
+        $this->postWebhook('stripe', $payload, signature: $header)
+            ->assertStatus(401);
+
+        $this->assertSame('pending', $attempt->fresh()->status);
+    }
+
+    public function test_tampered_body_fails_hmac_verification(): void
+    {
+        $attempt = $this->createRefundAttempt('stripe');
+
+        // Sign one body, send a different one.
+        $originalBody = json_encode($this->webhookPayload(
+            'evt_hmac_tampered',
+            'refund.succeeded',
+            $attempt->processor_reference_id,
+        ));
+
+        $tamperedBody = json_encode($this->webhookPayload(
+            'evt_hmac_tampered',
+            'refund.succeeded',
+            $attempt->processor_reference_id,
+            ['amount' => 99999],
+        ));
+
+        $timestamp = now()->timestamp;
+        $secret    = config('webhooks.secrets.stripe');
+        $signature = hash_hmac('sha256', "{$timestamp}.{$originalBody}", $secret);
+        $header    = "t={$timestamp},v1={$signature}";
+
+        $this->call('POST', '/api/v1/webhooks/stripe', [], [], [], [
+            'CONTENT_TYPE'          => 'application/json',
+            'HTTP_STRIPE_SIGNATURE' => $header,
+        ], $tamperedBody)->assertStatus(401);
+    }
+
+    public function test_tampered_timestamp_fails_hmac_verification(): void
+    {
+        $attempt = $this->createRefundAttempt('stripe');
+
+        $body = json_encode($this->webhookPayload(
+            'evt_hmac_ts_tamper',
+            'refund.succeeded',
+            $attempt->processor_reference_id,
+        ));
+
+        $signedAt = now()->timestamp;
+        $sentAt   = $signedAt + 1;
+
+        $secret    = config('webhooks.secrets.stripe');
+        $signature = hash_hmac('sha256', "{$signedAt}.{$body}", $secret);
+        $header    = "t={$sentAt},v1={$signature}";
+
+        $this->call('POST', '/api/v1/webhooks/stripe', [], [], [], [
+            'CONTENT_TYPE'          => 'application/json',
+            'HTTP_STRIPE_SIGNATURE' => $header,
+        ], $body)->assertStatus(401);
+    }
+
+    public function test_missing_processor_secret_is_rejected(): void
+    {
+        $body = json_encode([
+            'id'   => 'evt_no_secret',
+            'type' => 'refund.succeeded',
+            'data' => ['object' => ['id' => 're_anything']],
+        ]);
+
+        $timestamp = now()->timestamp;
+        $signature = hash_hmac('sha256', "{$timestamp}.{$body}", 'anything');
+        $header    = "t={$timestamp},v1={$signature}";
+
+        $this->call('POST', '/api/v1/webhooks/nonexistent_processor', [], [], [], [
+            'CONTENT_TYPE'          => 'application/json',
+            'HTTP_STRIPE_SIGNATURE' => $header,
+        ], $body)->assertStatus(401);
     }
 
     // ---------------------------------------------------------------------
@@ -185,7 +316,7 @@ class RefundWebhookApiContractTest extends TestCase
     }
 
     // ---------------------------------------------------------------------
-    // 6–7. Unknown type / unknown reference are handled silently
+    // 6–7. Unknown type / unknown reference
     // ---------------------------------------------------------------------
 
     public function test_unknown_event_type_is_accepted_and_ignored(): void
@@ -231,7 +362,7 @@ class RefundWebhookApiContractTest extends TestCase
     }
 
     // ---------------------------------------------------------------------
-    // 9. Processor identity comes from the route, not the payload
+    // 9. Processor identity comes from the route
     // ---------------------------------------------------------------------
 
     public function test_stripe_webhook_cannot_modify_a_paypal_attempt(): void
@@ -303,6 +434,11 @@ class RefundWebhookApiContractTest extends TestCase
 
     public function test_malformed_json_returns_400(): void
     {
+        $body      = '{not valid json';
+        $timestamp = now()->timestamp;
+        $secret    = config('webhooks.secrets.stripe');
+        $signature = hash_hmac('sha256', "{$timestamp}.{$body}", $secret);
+
         $response = $this->call(
             'POST',
             '/api/v1/webhooks/stripe',
@@ -311,9 +447,9 @@ class RefundWebhookApiContractTest extends TestCase
             [],
             [
                 'CONTENT_TYPE'          => 'application/json',
-                'HTTP_STRIPE_SIGNATURE' => $this->freshSignature(),
+                'HTTP_STRIPE_SIGNATURE' => "t={$timestamp},v1={$signature}",
             ],
-            '{not valid json',
+            $body,
         );
 
         $this->assertContains($response->status(), [400, 422]);
@@ -337,7 +473,7 @@ class RefundWebhookApiContractTest extends TestCase
     }
 
     // ---------------------------------------------------------------------
-    // 14. Signature must be verified against the raw body, not the parsed payload
+    // 14. Signature verified against raw body
     // ---------------------------------------------------------------------
 
     public function test_signature_is_verified_against_the_raw_body_not_the_parsed_payload(): void
@@ -367,6 +503,10 @@ class RefundWebhookApiContractTest extends TestCase
 
         $this->assertNotSame($canonical, $reordered);
 
+        $timestamp = now()->timestamp;
+        $secret    = config('webhooks.secrets.stripe');
+        $signature = hash_hmac('sha256', "{$timestamp}.{$reordered}", $secret);
+
         $response = $this->call(
             'POST',
             '/api/v1/webhooks/stripe',
@@ -375,7 +515,7 @@ class RefundWebhookApiContractTest extends TestCase
             [],
             [
                 'CONTENT_TYPE'          => 'application/json',
-                'HTTP_STRIPE_SIGNATURE' => $this->freshSignature(),
+                'HTTP_STRIPE_SIGNATURE' => "t={$timestamp},v1={$signature}",
             ],
             $reordered,
         );
@@ -394,24 +534,22 @@ class RefundWebhookApiContractTest extends TestCase
         $attempt = $this->createRefundAttempt('stripe');
 
         $oldTimestamp = now()->subHour()->timestamp;
-
-        $payload = $this->webhookPayload(
+        $payload      = $this->webhookPayload(
             'evt_replay_old',
             'refund.succeeded',
             $attempt->processor_reference_id,
         );
+        $body      = json_encode($payload);
+        $secret    = config('webhooks.secrets.stripe');
+        $signature = hash_hmac('sha256', "{$oldTimestamp}.{$body}", $secret);
 
-        $this->postWebhook(
-            'stripe',
-            $payload,
-            signature: "t={$oldTimestamp},v1=valid_secret_signature",
-        )->assertStatus(401);
+        $this->call('POST', '/api/v1/webhooks/stripe', [], [], [], [
+            'CONTENT_TYPE'          => 'application/json',
+            'HTTP_STRIPE_SIGNATURE' => "t={$oldTimestamp},v1={$signature}",
+        ], $body)->assertStatus(401);
 
         $this->assertSame('pending', $attempt->fresh()->status);
-
-        $this->assertDatabaseMissing('payment_webhook_events', [
-            'event_id' => 'evt_replay_old',
-        ]);
+        $this->assertDatabaseMissing('payment_webhook_events', ['event_id' => 'evt_replay_old']);
     }
 
     public function test_webhook_within_the_replay_window_is_accepted(): void
@@ -419,24 +557,25 @@ class RefundWebhookApiContractTest extends TestCase
         $attempt = $this->createRefundAttempt('stripe');
 
         $freshTimestamp = now()->subSeconds(10)->timestamp;
-
-        $payload = $this->webhookPayload(
+        $payload        = $this->webhookPayload(
             'evt_replay_fresh',
             'refund.succeeded',
             $attempt->processor_reference_id,
         );
+        $body      = json_encode($payload);
+        $secret    = config('webhooks.secrets.stripe');
+        $signature = hash_hmac('sha256', "{$freshTimestamp}.{$body}", $secret);
 
-        $this->postWebhook(
-            'stripe',
-            $payload,
-            signature: "t={$freshTimestamp},v1=valid_secret_signature",
-        )->assertStatus(200);
+        $this->call('POST', '/api/v1/webhooks/stripe', [], [], [], [
+            'CONTENT_TYPE'          => 'application/json',
+            'HTTP_STRIPE_SIGNATURE' => "t={$freshTimestamp},v1={$signature}",
+        ], $body)->assertStatus(200);
 
         $this->assertSame('succeeded', $attempt->fresh()->status);
     }
 
     // ---------------------------------------------------------------------
-    // 16. A signed webhook with no reference still returns 200
+    // 16. Signed webhook with no reference still 200
     // ---------------------------------------------------------------------
 
     public function test_valid_signed_webhook_with_no_reference_still_returns_200(): void

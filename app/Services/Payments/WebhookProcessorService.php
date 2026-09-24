@@ -25,7 +25,7 @@ class WebhookProcessorService
         string $signature,
         string $rawBody,
     ): void {
-        // 1. Verify signature (Extensible stub for now)
+        // 1. Verify signature (real HMAC-SHA256)
         if (!$this->verifySignature($processor, $payload, $signature, $rawBody)) {
             throw new InvalidArgumentException('Invalid webhook signature.');
         }
@@ -195,13 +195,15 @@ class WebhookProcessorService
     }
 
     /**
-     * Verify the webhook signature. Accepts both:
-     *   - Bare: `valid_secret_signature`
-     *   - Stripe-style header: `t=<ts>,v1=valid_secret_signature`
+     * Verify the Stripe-style HMAC-SHA256 signature.
      *
-     * Real HMAC verification (against $rawBody) goes here later. The
-     * $rawBody parameter is intentionally accepted now so the plumbing
-     * is in place.
+     * Header format:  `t=<unix_seconds>,v1=<hex_hmac>`
+     * Signing string: `{t}.{raw_body}`
+     * Signature:      hex(HMAC-SHA256(secret, signing_string))
+     *
+     * Backwards compatible with the legacy bare-string signature
+     * ('valid_secret_signature') ONLY when the app is running in the
+     * `testing` environment. In production, real HMAC is required.
      */
     protected function verifySignature(
         string $processor,
@@ -209,27 +211,38 @@ class WebhookProcessorService
         string $signature,
         string $rawBody,
     ): bool {
-        if ($signature === 'valid_secret_signature') {
+        // Legacy test shortcut: only in the testing environment.
+        if (app()->environment('testing') && $signature === 'valid_secret_signature') {
             return true;
         }
 
-        if (preg_match('/^t=\d+,v1=(.+)$/', $signature, $matches)) {
-            return $matches[1] === 'valid_secret_signature';
+        // Stripe-style header: parse `t=` and `v1=`.
+        if (! preg_match('/^t=(\d+),v1=([a-f0-9]+)$/i', $signature, $matches)) {
+            return false;
         }
 
-        return false;
+        $timestamp = $matches[1];
+        $provided  = strtolower($matches[2]);
+
+        $secret = config("webhooks.secrets.{$processor}");
+        if (empty($secret)) {
+            return false;
+        }
+
+        $expected = hash_hmac('sha256', "{$timestamp}.{$rawBody}", $secret);
+
+        // Constant-time comparison to prevent timing attacks.
+        return hash_equals($expected, $provided);
     }
 
     /**
      * Reject webhooks whose signature header timestamp is outside the
      * configured replay window.
      *
-     * @throws InvalidArgumentException when the timestamp is missing or too old
+     * @throws InvalidArgumentException
      */
     protected function verifyTimestamp(string $signature): void
     {
-        // Bare signatures (no `t=`) are legacy test-style. Skip the check
-        // until real HMAC lands. Real Stripe headers always have `t=`.
         if (! preg_match('/t=(\d+)/', $signature, $matches)) {
             return;
         }

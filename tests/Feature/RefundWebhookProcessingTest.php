@@ -44,11 +44,22 @@ class RefundWebhookProcessingTest extends TestCase
         ]);
     }
 
-    private function sendWebhook(string $processor, array $payload, string $signature = 'valid_secret_signature')
-    {
-        return $this->withHeader('Stripe-Signature', $signature)
-            ->postJson("/api/v1/webhooks/{$processor}", $payload);
+    private function sendWebhook(string $processor, array $payload, ?string $signature = null)
+{
+    $body = json_encode($payload);
+
+    if ($signature === null) {
+        $secret    = config("webhooks.secrets.{$processor}", 'whsec_test_secret_do_not_use_in_prod');
+        $timestamp = now()->timestamp;
+        $signature = hash_hmac('sha256', "{$timestamp}.{$body}", $secret);
+        $signature = "t={$timestamp},v1={$signature}";
     }
+
+    return $this->call('POST', "/api/v1/webhooks/{$processor}", [], [], [], [
+        'CONTENT_TYPE'          => 'application/json',
+        'HTTP_STRIPE_SIGNATURE' => $signature,
+    ], $body);
+}
 
     private function payload(string $eventId, string $type, string $referenceId, array $extra = []): array
     {
